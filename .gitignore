@@ -1,0 +1,10 @@
+**/__pycache__
+**/__init__
+*.db
+logs
+pebble-python-config.json
+pebblehost.yml
+bump_data.json
+.env
+config
+save
