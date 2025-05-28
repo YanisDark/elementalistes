@@ -259,6 +259,67 @@ class BumpReminder(commands.Cog):
             if time_since_personal >= timedelta(minutes=30):
                 return True
         return False
+
+    async def clear_old_bump_messages(self):
+        """Nettoie les anciens messages de bump au démarrage"""
+        try:
+            discussion_channel = await self.get_channel_safe(self.bump_reminder_channel_id)
+            if not discussion_channel:
+                logging.warning("Canal de discussion non trouvé pour le nettoyage")
+                return
+                
+            logging.info("🧹 Nettoyage des anciens messages de bump...")
+            
+            guild = await self.get_guild_safe()
+            if not guild:
+                return
+                
+            # Mots-clés pour identifier les messages de bump
+            bump_keywords = [
+                "bump le serveur",
+                "serveur bumpé avec succès",
+                "pourrais-tu bump",
+                "bump afin de",
+                "<:konatacry:",
+                "<a:anyayay:",
+                "incantations",
+                "utiliser la commande bump"
+            ]
+            
+            messages_to_delete = []
+            
+            # Recherche les messages du bot contenant des mots-clés de bump (limite à 50 pour éviter trop de requêtes)
+            async for message in self.safe_history_iteration(discussion_channel, limit=50):
+                # Vérifie si c'est un message du bot
+                if message.author == guild.me:
+                    message_content = message.content.lower()
+                    
+                    # Vérifie si le message contient des mots-clés de bump
+                    if any(keyword.lower() in message_content for keyword in bump_keywords):
+                        messages_to_delete.append(message)
+                        
+                    # Limite à ne pas dépasser pour éviter trop de suppressions
+                    if len(messages_to_delete) >= 20:
+                        break
+            
+            # Supprime les messages trouvés
+            deleted_count = 0
+            for message in messages_to_delete:
+                try:
+                    delete_coro = message.delete()
+                    await self.safe_api_call(delete_coro, f"nettoyage message bump")
+                    deleted_count += 1
+                    await asyncio.sleep(0.5)  # Pause pour éviter rate limit
+                except Exception as e:
+                    logging.error(f"Erreur suppression message {message.id}: {e}")
+                    
+            if deleted_count > 0:
+                logging.info(f"✅ {deleted_count} anciens messages de bump supprimés")
+            else:
+                logging.info("Aucun ancien message de bump trouvé")
+                
+        except Exception as e:
+            logging.error(f"Erreur nettoyage messages de bump: {e}")
             
     async def detect_last_bump_from_history(self):
         """Détecte le dernier bump avec optimisations rate limit"""
@@ -487,6 +548,9 @@ class BumpReminder(commands.Cog):
             return
             
         logging.info(f"✅ Serveur trouvé: {guild.name}")
+        
+        # NETTOYAGE EN PREMIER - Supprime les anciens messages de bump
+        await self.clear_old_bump_messages()
         
         # Détecte le dernier bump depuis l'historique
         await self.detect_last_bump_from_history()
@@ -749,6 +813,13 @@ class BumpReminder(commands.Cog):
             await self.safe_api_call(delete_coro, "reset bump timer")
             self.bump_message = None
         await ctx.send("✅ Timer de bump reseté !")
+
+    @commands.command(name='bump_clean')
+    @commands.has_permissions(administrator=True)
+    async def clean_bump_messages(self, ctx):
+        """Force le nettoyage des messages de bump"""
+        await self.clear_old_bump_messages()
+        await ctx.send("✅ Nettoyage des messages de bump effectué !")
         
     @commands.command(name='bump_status')
     @commands.has_permissions(administrator=True)
