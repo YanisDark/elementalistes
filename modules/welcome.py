@@ -128,6 +128,9 @@ class WelcomeView(discord.ui.View):
                 self.cog.welcome_messages[member_id] = []
             self.cog.welcome_messages[member_id].append(response_message)
             
+            # Schedule deletion of this response message after 10 minutes
+            asyncio.create_task(self.cog._delete_single_message_after_delay(response_message, 600))
+            
         except discord.HTTPException as e:
             if e.status == 429:
                 # Rate limited - log and retry after delay
@@ -247,18 +250,26 @@ class Welcome(commands.Cog):
             # Collect messages first
             try:
                 await self.rate_limiter.wait_if_needed("general")
-                async for message in channel.history(limit=100):
+                async for message in channel.history(limit=200):
                     if message.author.id != self.bot.user.id:
                         continue
                     
                     should_delete = False
                     
-                    # Check for welcome patterns
-                    if "<a:konatahype:1377054145848279081>" in message.content:
-                        for pattern in self.welcome_patterns:
-                            if pattern in message.content.lower():
-                                should_delete = True
-                                break
+                    # Check for welcome patterns in content
+                    if message.content:
+                        content_lower = message.content.lower()
+                        
+                        # Check for main welcome emoji
+                        if "<a:konatahype:1377054145848279081>" in message.content:
+                            for pattern in self.welcome_patterns:
+                                if pattern in content_lower:
+                                    should_delete = True
+                                    break
+                        
+                        # Check for welcome response emoji
+                        if "<:greetingskonata:1377326152108212336>" in message.content:
+                            should_delete = True
                     
                     # Check for welcome button
                     if message.components:
@@ -446,8 +457,8 @@ Amusez-vous bien ! ✨"""
             self.welcome_messages[member.id].append(message)
             self.welcomed_by[member.id] = set()
             
-            # Schedule deletion
-            asyncio.create_task(self._delete_messages_after_delay(member.id, 3600))
+            # Schedule deletion after 10 minutes
+            asyncio.create_task(self._delete_messages_after_delay(member.id, 600))
             
         except discord.HTTPException as e:
             if e.status == 429:
@@ -482,7 +493,7 @@ Amusez-vous bien ! ✨"""
             if member.id not in self.welcomed_by:
                 self.welcomed_by[member.id] = set()
             
-            asyncio.create_task(self._delete_messages_after_delay(member.id, 3600))
+            asyncio.create_task(self._delete_messages_after_delay(member.id, 600))
             
         except Exception as e:
             logging.error(f"Erreur lors du retry du message de bienvenue: {e}")
@@ -529,7 +540,7 @@ Amusez-vous bien ! ✨"""
             if member.id not in self.welcomed_by:
                 self.welcomed_by[member.id] = set()
             
-            asyncio.create_task(self._delete_messages_after_delay(member.id, 3600))
+            asyncio.create_task(self._delete_messages_after_delay(member.id, 600))
             
             # Delete command message
             await self.safe_delete_message(ctx.message)
@@ -575,6 +586,11 @@ Amusez-vous bien ! ✨"""
         """Delete welcome messages after specified delay"""
         await asyncio.sleep(delay)
         await self._cleanup_member_messages(member_id)
+    
+    async def _delete_single_message_after_delay(self, message, delay):
+        """Delete a single message after specified delay"""
+        await asyncio.sleep(delay)
+        await self.safe_delete_message(message)
 
 async def setup(bot):
     await bot.add_cog(Welcome(bot))
