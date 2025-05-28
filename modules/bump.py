@@ -54,6 +54,7 @@ class BumpReminder(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.bump_message = None
+        self.personal_reminder_message = None
         self.last_bump_time = None
         self.last_general_reminder_time = None
         self.last_personal_reminder_time = None
@@ -449,6 +450,8 @@ class BumpReminder(commands.Cog):
             )
             
             if sent_message:
+                # Stocke le message personnel pour pouvoir le transformer plus tard
+                self.personal_reminder_message = sent_message
                 self.last_personal_reminder_time = datetime.utcnow()
                 self.save_data()
                 
@@ -470,31 +473,42 @@ class BumpReminder(commands.Cog):
                 logging.error("Canal incantations non trouvé")
                 return None
                 
-            cutoff_time = disboard_message.created_at - timedelta(minutes=3)
+            cutoff_time = disboard_message.created_at - timedelta(minutes=5)
+            found_users = []
             
             # Recherche étendue dans le canal incantations
-            async for msg in self.safe_history_iteration(incantations_channel, limit=25, before=disboard_message, after=cutoff_time):
+            async for msg in self.safe_history_iteration(incantations_channel, limit=50, before=disboard_message, after=cutoff_time):
                 # Vérifie les interactions slash commands avec bump
                 if hasattr(msg, 'interaction') and msg.interaction:
-                    if (hasattr(msg.interaction, 'name') and msg.interaction.name == "bump") or \
-                       (hasattr(msg.interaction, 'data') and isinstance(msg.interaction.data, dict) and 
-                        msg.interaction.data.get('name') == 'bump'):
-                        logging.info(f"Utilisateur bump trouvé via interaction: {msg.interaction.user}")
+                    interaction_data = getattr(msg.interaction, 'data', {})
+                    if isinstance(interaction_data, dict):
+                        if interaction_data.get('name') == 'bump':
+                            logging.info(f"Utilisateur bump trouvé via interaction.data: {msg.interaction.user}")
+                            return msg.interaction.user
+                    
+                    if hasattr(msg.interaction, 'name') and msg.interaction.name == "bump":
+                        logging.info(f"Utilisateur bump trouvé via interaction.name: {msg.interaction.user}")
                         return msg.interaction.user
                 
                 # Vérifie les messages contenant /bump ou la mention du command
-                if (msg.content.strip().lower() in ["/bump", "!d bump"] or 
+                content_lower = msg.content.strip().lower()
+                if (content_lower in ["/bump", "!d bump", "bump"] or 
                     f"</{self.bump_command_id}>" in msg.content or
-                    ("bump" in msg.content.lower() and len(msg.content) < 50)):  # Messages courts avec "bump"
+                    f"</bump:{self.bump_command_id}>" in msg.content):
                     
                     logging.info(f"Utilisateur bump trouvé via message: {msg.author}")
-                    return msg.author
+                    found_users.append((msg.author, msg.created_at))
                     
                 # Vérifie si le message a été créé par une interaction bump
                 if (hasattr(msg, 'application_id') and msg.application_id == self.disboard_id and
                     not msg.author.bot):
                     logging.info(f"Utilisateur bump trouvé via application_id: {msg.author}")
-                    return msg.author
+                    found_users.append((msg.author, msg.created_at))
+            
+            # Retourne l'utilisateur le plus récent si plusieurs trouvés
+            if found_users:
+                found_users.sort(key=lambda x: x[1], reverse=True)
+                return found_users[0][0]
                     
         except Exception as e:
             logging.error(f"Erreur recherche utilisateur bump: {e}")
@@ -511,14 +525,23 @@ class BumpReminder(commands.Cog):
             self.save_data()
             self.reminder_active = False
             
-            # Met à jour le message de rappel s'il existe
-            if self.bump_message:
+            # Détermine quel message transformer (priorité au personnel)
+            message_to_update = None
+            if self.personal_reminder_message:
+                message_to_update = self.personal_reminder_message
+                self.personal_reminder_message = None
+            elif self.bump_message:
+                message_to_update = self.bump_message
+                self.bump_message = None
+            
+            # Transforme le message approprié
+            if message_to_update:
                 if bump_user:
                     message_content = f"<a:anyayay:1377087649403109498> Serveur bumpé avec succès ! Merci à {bump_user.mention} pour avoir soutenu le serveur !"
                 else:
                     message_content = f"<a:anyayay:1377087649403109498> Serveur bumpé avec succès ! Merci !"
                 
-                edit_coro = self.bump_message.edit(content=message_content)
+                edit_coro = message_to_update.edit(content=message_content)
                 await self.safe_api_call(edit_coro, "mise à jour message bump")
                 
                 france_time = self.convert_to_france_time(self.last_bump_time)
@@ -526,9 +549,8 @@ class BumpReminder(commands.Cog):
                 
                 # Supprime le message après 5 minutes
                 await asyncio.sleep(300)
-                delete_coro = self.bump_message.delete()
+                delete_coro = message_to_update.delete()
                 await self.safe_api_call(delete_coro, "suppression message bump")
-                self.bump_message = None
             
             logging.info(f"✅ Bump traité pour {bump_user or 'utilisateur inconnu'}")
                 
@@ -599,7 +621,7 @@ class BumpReminder(commands.Cog):
         except Exception as e:
             logging.error(f"Erreur bump monitor task: {e}")
     
-    @tasks.loop(minutes=10)  # Réduit la fréquence des rappels personnels
+    @tasks.loop(minutes=10)
     async def personal_reminder_task(self):
         """Vérifie si un rappel personnel doit être envoyé"""
         try:
@@ -607,18 +629,19 @@ class BumpReminder(commands.Cog):
                 return
             
             if self.should_send_personal_reminder():
-                # Supprime l'ancien message de rappel général s'il existe
-                if self.bump_message:
-                    delete_coro = self.bump_message.delete()
-                    await self.safe_api_call(delete_coro, "suppression ancien message")
-                    self.bump_message = None
-                
-                # Trouve un membre actif
+                # D'ABORD trouve un membre actif
                 active_member = await self.get_recent_active_member()
+                
                 if active_member:
+                    # SEULEMENT SI un membre est trouvé, supprime l'ancien message général
+                    if self.bump_message:
+                        delete_coro = self.bump_message.delete()
+                        await self.safe_api_call(delete_coro, "suppression ancien message")
+                        self.bump_message = None
+                    
                     await self.send_personal_bump_reminder(active_member)
                 else:
-                    logging.info("Aucun membre actif trouvé pour rappel personnel")
+                    logging.info("Aucun membre actif trouvé, rappel général maintenu")
                 
         except Exception as e:
             logging.error(f"Erreur personal reminder task: {e}")
@@ -712,10 +735,16 @@ class BumpReminder(commands.Cog):
                     self.last_personal_reminder_time = None
                     self.save_data()
                     self.reminder_active = False
+                    
+                    # Supprime les messages de rappel s'ils existent
                     if self.bump_message:
                         delete_coro = self.bump_message.delete()
                         await self.safe_api_call(delete_coro, "suppression message après bump")
                         self.bump_message = None
+                    if self.personal_reminder_message:
+                        delete_coro = self.personal_reminder_message.delete()
+                        await self.safe_api_call(delete_coro, "suppression message personnel après bump")
+                        self.personal_reminder_message = None
                     
         except Exception as e:
             logging.error(f"Erreur détection bump: {e}")
@@ -737,7 +766,8 @@ class BumpReminder(commands.Cog):
 **État:**
 • Système initialisé: `{self.initialized}`
 • Rappel actif: `{self.reminder_active}`
-• Message de rappel: `{bool(self.bump_message)}`
+• Message de rappel général: `{bool(self.bump_message)}`
+• Message de rappel personnel: `{bool(self.personal_reminder_message)}`
 • Membres actifs en cache: `{len(self._recent_active_members)}`
 • Requêtes/sec: `{len(self.rate_limiter.request_timestamps)}/45`
 • Requêtes invalides: `{self.rate_limiter.invalid_requests}/9500`
@@ -812,6 +842,10 @@ class BumpReminder(commands.Cog):
             delete_coro = self.bump_message.delete()
             await self.safe_api_call(delete_coro, "reset bump timer")
             self.bump_message = None
+        if self.personal_reminder_message:
+            delete_coro = self.personal_reminder_message.delete()
+            await self.safe_api_call(delete_coro, "reset bump timer")
+            self.personal_reminder_message = None
         await ctx.send("✅ Timer de bump reseté !")
 
     @commands.command(name='bump_clean')
