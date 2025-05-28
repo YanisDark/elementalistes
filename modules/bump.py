@@ -291,7 +291,7 @@ class BumpReminder(commands.Cog):
             return False
     
     async def send_pretty_bump_command_message(self):
-        """Envoie un joli message de commande bump dans INCANTATIONS"""
+        """Envoie un message simple de commande bump dans INCANTATIONS"""
         try:
             incantations_channel = await self.get_channel_safe(self.incantations_channel_id)
             if not incantations_channel:
@@ -299,19 +299,12 @@ class BumpReminder(commands.Cog):
             
             bump_command_mention = f"</bump:{self.bump_command_id}>"
             
-            embed = discord.Embed(
-                title="🚀 Bump le serveur !",
-                description=f"Utilise la commande {bump_command_mention} pour aider notre serveur à grandir !",
-                color=0x7C3AED
-            )
-            embed.add_field(
-                name="💜 Pourquoi bumper ?", 
-                value="Cela permet à de nouvelles personnes de découvrir notre communauté !", 
-                inline=False
-            )
-            embed.set_footer(text="Merci de soutenir Les Élémentalistes ! ✨")
+            message_content = f"🚀 **Bump le serveur !**\n\n" \
+                            f"Utilise la commande {bump_command_mention} pour aider notre serveur à grandir !\n\n" \
+                            f"💜 **Pourquoi bumper ?** Cela permet à de nouvelles personnes de découvrir notre communauté !\n\n" \
+                            f"*Merci de soutenir Les Élémentalistes ! ✨*"
             
-            await self.safe_api_call(incantations_channel.send(embed=embed), "envoi message bump")
+            await self.safe_api_call(incantations_channel.send(message_content), "envoi message bump")
             logging.info("Message de commande bump envoyé")
                 
         except Exception as e:
@@ -408,27 +401,40 @@ class BumpReminder(commands.Cog):
             return False
         
     async def find_bump_user(self, disboard_message):
-        """Trouve l'utilisateur qui a effectué le bump avec optimisations"""
-        cutoff_time = disboard_message.created_at - timedelta(minutes=2)
-        
-        # Recherche optimisée dans le canal du message Disboard seulement
+        """Trouve l'utilisateur qui a effectué le bump dans le canal incantations"""
         try:
-            async for msg in self.safe_history_iteration(disboard_message.channel, limit=10, before=disboard_message, after=cutoff_time):
-                # Vérifie les interactions slash commands
+            # Cherche uniquement dans le canal incantations
+            incantations_channel = await self.get_channel_safe(self.incantations_channel_id)
+            if not incantations_channel:
+                logging.error("Canal incantations non trouvé")
+                return None
+                
+            cutoff_time = disboard_message.created_at - timedelta(minutes=3)
+            
+            # Recherche étendue dans le canal incantations
+            async for msg in self.safe_history_iteration(incantations_channel, limit=25, before=disboard_message, after=cutoff_time):
+                # Vérifie les interactions slash commands avec bump
                 if hasattr(msg, 'interaction') and msg.interaction:
                     if (hasattr(msg.interaction, 'name') and msg.interaction.name == "bump") or \
                        (hasattr(msg.interaction, 'data') and isinstance(msg.interaction.data, dict) and 
                         msg.interaction.data.get('name') == 'bump'):
+                        logging.info(f"Utilisateur bump trouvé via interaction: {msg.interaction.user}")
                         return msg.interaction.user
                 
-                # Vérifie les messages texte avec /bump
-                if msg.content.strip().lower() == "/bump":
+                # Vérifie les messages contenant /bump ou la mention du command
+                if (msg.content.strip().lower() in ["/bump", "!d bump"] or 
+                    f"</{self.bump_command_id}>" in msg.content or
+                    ("bump" in msg.content.lower() and len(msg.content) < 50)):  # Messages courts avec "bump"
+                    
+                    logging.info(f"Utilisateur bump trouvé via message: {msg.author}")
                     return msg.author
                     
-                # Vérifie si le message fait référence au bump command
-                if f"</{self.bump_command_id}>" in msg.content or "bump" in msg.content.lower():
+                # Vérifie si le message a été créé par une interaction bump
+                if (hasattr(msg, 'application_id') and msg.application_id == self.disboard_id and
+                    not msg.author.bot):
+                    logging.info(f"Utilisateur bump trouvé via application_id: {msg.author}")
                     return msg.author
-                        
+                    
         except Exception as e:
             logging.error(f"Erreur recherche utilisateur bump: {e}")
             
@@ -589,7 +595,7 @@ class BumpReminder(commands.Cog):
                 self.last_general_reminder_time = datetime.utcnow()
                 self.save_data()
                 
-                # Envoie le joli message de commande bump juste après
+                # Envoie le message de commande bump juste après
                 await self.send_pretty_bump_command_message()
                 
                 france_time = self.convert_to_france_time(self.last_general_reminder_time)
@@ -628,10 +634,11 @@ class BumpReminder(commands.Cog):
                 
                 logging.info(f"Bump détecté dans {message.channel.name}")
                 
-                # Trouve l'utilisateur qui a bumpé
+                # Trouve l'utilisateur qui a bumpé dans le canal incantations
                 bump_user = await self.find_bump_user(message)
                 
                 if bump_user:
+                    logging.info(f"✅ Utilisateur qui a bumpé trouvé: {bump_user}")
                     await self.handle_successful_bump(bump_user)
                 else:
                     logging.warning("Impossible de trouver l'utilisateur qui a bumpé")
