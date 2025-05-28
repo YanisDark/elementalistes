@@ -111,11 +111,11 @@ class WelcomeView(discord.ui.View):
             self.cog.welcomed_by[member_id].add(interaction.user.id)
             
             welcome_responses = [
-                f"**{interaction.user.display_name}** accueille **{member.display_name}** dans la famille ! <a:konatahype:1377054145848279081>",
-                f"**{interaction.user.display_name}** souhaite la bienvenue à **{member.display_name}** ! <a:konatahype:1377054145848279081>",
-                f"**{interaction.user.display_name}** dit salut à **{member.display_name}** ! <a:konatahype:1377054145848279081>",
-                f"**{interaction.user.display_name}** ouvre les bras pour **{member.display_name}** ! <a:konatahype:1377054145848279081>",
-                f"**{interaction.user.display_name}** célèbre l'arrivée de **{member.display_name}** ! <a:konatahype:1377054145848279081>"
+                f"**{interaction.user.display_name}** accueille **{member.display_name}** dans la famille ! <:greetingskonata:1377326152108212336>",
+                f"**{interaction.user.display_name}** souhaite la bienvenue à **{member.display_name}** ! <:greetingskonata:1377326152108212336>",
+                f"**{interaction.user.display_name}** dit salut à **{member.display_name}** ! <:greetingskonata:1377326152108212336>",
+                f"**{interaction.user.display_name}** ouvre les bras pour **{member.display_name}** ! <:greetingskonata:1377326152108212336>",
+                f"**{interaction.user.display_name}** célèbre l'arrivée de **{member.display_name}** ! <:greetingskonata:1377326152108212336>"
             ]
             
             welcome_message = random.choice(welcome_responses)
