@@ -21,6 +21,8 @@ class TemporaryChannels(commands.Cog):
         self.vocal_category_id = int(os.getenv('VOCAL_CATEGORY_ID', 0))
         self.db_path = 'temporary_channels.db'
         self.control_messages = {}  # Store message references
+        self.claim_views = {}  # Store claim ownership views by channel_id
+        self.claim_messages = {}  # Store "canal sans propriétaire" messages by channel_id
         
     async def cog_load(self):
         await self.init_db()
@@ -37,10 +39,18 @@ class TemporaryChannels(commands.Cog):
                 CREATE TABLE IF NOT EXISTS temp_channels (
                     channel_id INTEGER PRIMARY KEY,
                     owner_id INTEGER NOT NULL,
+                    original_owner_id INTEGER,
                     channel_type TEXT DEFAULT 'open',
                     soundboards_enabled BOOLEAN DEFAULT 1
                 )
             ''')
+            
+            # Add original_owner_id column if it doesn't exist
+            try:
+                await db.execute('ALTER TABLE temp_channels ADD COLUMN original_owner_id INTEGER')
+                await db.commit()
+            except aiosqlite.OperationalError:
+                pass  # Column already exists
             
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS channel_whitelist (
@@ -77,8 +87,109 @@ class TemporaryChannels(commands.Cog):
         if after.channel and after.channel.id == self.creer_vocal_id:
             await self.create_temp_channel(member)
         
+        # Handle joining temp channels
+        if after.channel and await self.is_temp_channel(after.channel.id):
+            await self.handle_join_temp_channel(after.channel, member)
+        
         if before.channel and await self.is_temp_channel(before.channel.id):
             await self.handle_leave_temp_channel(before.channel, member)
+    
+    async def handle_join_temp_channel(self, channel, member):
+        """Handle when someone joins a temp channel - check for automatic ownership restoration"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                'SELECT owner_id, original_owner_id FROM temp_channels WHERE channel_id = ?',
+                (channel.id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return
+                current_owner_id, original_owner_id = row
+        
+        # Check if original owner is rejoining and current owner is not in channel
+        if (original_owner_id and member.id == original_owner_id and 
+            current_owner_id != original_owner_id):
+            
+            current_owner = channel.guild.get_member(current_owner_id)
+            if not current_owner or current_owner not in channel.members:
+                # Restore ownership to original owner
+                await self.transfer_ownership_to(channel, member.id, automatic=True)
+                
+                # Update any existing claim ownership view and remove claim message
+                await self.cleanup_claim_system(channel.id, member)
+                
+                embed = discord.Embed(
+                    title="👑 Propriété Automatiquement Restaurée",
+                    description=f"**{member.display_name}** a retrouvé la propriété de son canal !",
+                    color=0x00ff00
+                )
+                try:
+                    await rate_limiter.safe_send(channel, embed=embed)
+                except discord.Forbidden:
+                    pass
+    
+    async def cleanup_claim_system(self, channel_id, returning_owner=None):
+        """Clean up claim ownership system when ownership changes"""
+        # Update and remove claim view
+        if channel_id in self.claim_views:
+            view = self.claim_views[channel_id]
+            if returning_owner:
+                await view.update_for_owner_return(returning_owner)
+            del self.claim_views[channel_id]
+        
+        # Delete claim message
+        if channel_id in self.claim_messages:
+            try:
+                await rate_limiter.safe_delete(self.claim_messages[channel_id])
+            except (discord.NotFound, discord.HTTPException):
+                pass
+            del self.claim_messages[channel_id]
+    
+    async def transfer_ownership_to(self, channel, new_owner_id, automatic=False):
+        """Transfer ownership of a channel to a new owner"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'UPDATE temp_channels SET owner_id = ? WHERE channel_id = ?',
+                (new_owner_id, channel.id)
+            )
+            await db.commit()
+        
+        guild = channel.guild
+        new_owner = guild.get_member(new_owner_id)
+        if not new_owner:
+            return False
+        
+        # Remove all existing management permissions except for new owner
+        for member, overwrite in channel.overwrites.items():
+            if isinstance(member, discord.Member) and member != new_owner:
+                if overwrite.manage_channels or overwrite.manage_permissions:
+                    await rate_limiter.safe_channel_edit(channel, overwrites={
+                        **channel.overwrites,
+                        member: discord.PermissionOverwrite.from_pair(
+                            discord.Permissions.none(), 
+                            discord.Permissions.none()
+                        )
+                    })
+        
+        # Give new owner permissions
+        owner_overwrites = discord.PermissionOverwrite(
+            manage_channels=True,
+            manage_permissions=True,
+            connect=True,
+            view_channel=True,
+            use_soundboard=True
+        )
+        
+        await rate_limiter.safe_channel_edit(channel, overwrites={
+            **channel.overwrites,
+            new_owner: owner_overwrites
+        })
+        
+        # Send new control embed
+        if not automatic:
+            await self.send_control_embed(channel, new_owner_id)
+        
+        return True
     
     async def create_temp_channel(self, member):
         guild = member.guild
@@ -128,8 +239,8 @@ class TemporaryChannels(commands.Cog):
         
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                'INSERT INTO temp_channels (channel_id, owner_id) VALUES (?, ?)',
-                (channel.id, member.id)
+                'INSERT INTO temp_channels (channel_id, owner_id, original_owner_id) VALUES (?, ?, ?)',
+                (channel.id, member.id, member.id)
             )
             await db.commit()
         
@@ -334,15 +445,23 @@ class TemporaryChannels(commands.Cog):
                 inline=False
             )
             view = ClaimOwnershipView(self, channel.id)
+            self.claim_views[channel.id] = view  # Store the view reference
+            
             try:
-                await rate_limiter.safe_send(channel, embed=embed, view=view)
+                message = await rate_limiter.safe_send(channel, embed=embed, view=view)
+                if message:
+                    view.message = message  # Store message reference in view
+                    self.claim_messages[channel.id] = message  # Store for cleanup
             except discord.Forbidden:
                 admin_channel_id = int(os.getenv('COMMANDES_ADMIN_CHANNEL_ID', 0))
                 if admin_channel_id:
                     admin_channel = channel.guild.get_channel(admin_channel_id)
                     if admin_channel:
                         embed.add_field(name="🎯 Canal", value=f"{channel.name} ({channel.id})", inline=False)
-                        await rate_limiter.safe_send(admin_channel, embed=embed, view=view)
+                        message = await rate_limiter.safe_send(admin_channel, embed=embed, view=view)
+                        if message:
+                            view.message = message
+                            self.claim_messages[channel.id] = message
         elif len(channel.members) == 0:
             await self.delete_temp_channel(channel.id)
     
@@ -350,6 +469,14 @@ class TemporaryChannels(commands.Cog):
         # Remove from control messages cache
         if channel_id in self.control_messages:
             del self.control_messages[channel_id]
+        
+        # Remove from claim views cache
+        if channel_id in self.claim_views:
+            del self.claim_views[channel_id]
+        
+        # Remove from claim messages cache
+        if channel_id in self.claim_messages:
+            del self.claim_messages[channel_id]
             
         channel = self.bot.get_channel(channel_id)
         if channel:
@@ -983,40 +1110,16 @@ class ChannelControlView(discord.ui.View):
             await interaction.followup.send("❌ Utilisateur introuvable sur le serveur.", ephemeral=True)
             return
         
-        async with aiosqlite.connect(self.cog.db_path) as db:
-            await db.execute(
-                'UPDATE temp_channels SET owner_id = ? WHERE channel_id = ?',
-                (user_id, self.channel_id)
-            )
-            await db.commit()
-        
         channel = self.cog.bot.get_channel(self.channel_id)
-        if channel:
-            old_owner = guild.get_member(self.owner_id)
-            
-            if old_owner:
-                await rate_limiter.execute_request(
-                    channel.set_permissions(old_owner, overwrite=None),
-                    route=f'PUT /channels/{channel.id}/permissions/{old_owner.id}',
-                    major_params={'channel_id': channel.id}
-                )
-            
-            overwrites = discord.PermissionOverwrite(
-                manage_channels=True,
-                manage_permissions=True,
-                connect=True,
-                view_channel=True,
-                use_soundboard=True
-            )
-            await rate_limiter.execute_request(
-                channel.set_permissions(new_owner, overwrite=overwrites),
-                route=f'PUT /channels/{channel.id}/permissions/{new_owner.id}',
-                major_params={'channel_id': channel.id}
-            )
+        if not channel:
+            await interaction.followup.send("❌ Canal introuvable.", ephemeral=True)
+            return
         
-        self.owner_id = user_id
-        await interaction.followup.send(f"👑 Propriété transférée avec succès à **{new_owner.display_name}** !", ephemeral=True)
-        await self.refresh_embed()
+        success = await self.cog.transfer_ownership_to(channel, user_id, automatic=False)
+        if success:
+            await interaction.followup.send(f"👑 Propriété transférée avec succès à **{new_owner.display_name}** !", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ Erreur lors du transfert de propriété.", ephemeral=True)
     
     async def refresh_embed(self):
         channel = self.cog.bot.get_channel(self.channel_id)
@@ -1030,37 +1133,113 @@ class ClaimOwnershipView(discord.ui.View):
         super().__init__(timeout=300)
         self.cog = cog
         self.channel_id = channel_id
+        self.message = None  # Will store message reference
+        self.claimed = False  # Track if ownership was claimed
+    
+    async def update_for_owner_return(self, owner):
+        """Update the view when the original owner returns"""
+        if self.claimed:
+            return  # Already claimed by someone else
+            
+        embed = discord.Embed(
+            title="🔄 Propriétaire de Retour",
+            description=f"**{owner.display_name}** est revenu et a automatiquement récupéré la propriété de son canal !",
+            color=0x00ff00
+        )
+        embed.add_field(
+            name="ℹ️ Information",
+            value="Le canal est maintenant sous contrôle de son propriétaire original.\nLa revendication n'est plus possible.",
+            inline=False
+        )
+        
+        # Disable the button
+        for item in self.children:
+            item.disabled = True
+            item.label = "✅ Propriétaire Récupéré"
+        
+        # Update the message if we have a reference
+        if self.message:
+            try:
+                await rate_limiter.safe_edit(self.message, embed=embed, view=self)
+            except (discord.NotFound, discord.HTTPException):
+                pass
+        
+        self.stop()
     
     @discord.ui.button(label="👑 Revendiquer la propriété", style=discord.ButtonStyle.primary)
     async def claim_ownership(self, interaction, button):
-        channel = self.cog.bot.get_channel(self.channel_id)
-        if not channel or interaction.user not in channel.members:
-            await interaction.response.send_message("❌ Vous devez être dans le canal vocal pour le revendiquer.", ephemeral=True)
-            return
-        
-        async with aiosqlite.connect(self.cog.db_path) as db:
-            await db.execute(
-                'UPDATE temp_channels SET owner_id = ? WHERE channel_id = ?',
-                (interaction.user.id, self.channel_id)
-            )
-            await db.commit()
-        
-        overwrites = discord.PermissionOverwrite(
-            manage_channels=True,
-            manage_permissions=True,
-            connect=True,
-            view_channel=True,
-            use_soundboard=True
-        )
-        await rate_limiter.execute_request(
-            channel.set_permissions(interaction.user, overwrite=overwrites),
-            route=f'PUT /channels/{channel.id}/permissions/{interaction.user.id}',
-            major_params={'channel_id': channel.id}
-        )
-        
-        await interaction.response.send_message(f"🎉 **{interaction.user.display_name}** est maintenant propriétaire du canal !")
-        await self.cog.send_control_embed(channel, interaction.user.id)
-        self.stop()
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            channel = self.cog.bot.get_channel(self.channel_id)
+            if not channel:
+                await interaction.followup.send("❌ Canal introuvable.", ephemeral=True)
+                return
+            
+            # Check if original owner is back in the channel
+            async with aiosqlite.connect(self.cog.db_path) as db:
+                async with db.execute(
+                    'SELECT original_owner_id FROM temp_channels WHERE channel_id = ?',
+                    (self.channel_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if not row:
+                        await interaction.followup.send("❌ Canal temporaire introuvable.", ephemeral=True)
+                        return
+                    original_owner_id = row[0]
+            
+            # Check if original owner is in the channel
+            if original_owner_id:
+                original_owner = channel.guild.get_member(original_owner_id)
+                if original_owner and original_owner in channel.members:
+                    await interaction.followup.send("❌ Le propriétaire original est de retour dans le canal. Vous ne pouvez plus le revendiquer.", ephemeral=True)
+                    
+                    # Update the message to reflect owner return
+                    await self.update_for_owner_return(original_owner)
+                    return
+            
+            if interaction.user not in channel.members:
+                await interaction.followup.send("❌ Vous devez être dans le canal vocal pour le revendiquer.", ephemeral=True)
+                return
+            
+            success = await self.cog.transfer_ownership_to(channel, interaction.user.id, automatic=False)
+            if success:
+                self.claimed = True  # Mark as claimed
+                await interaction.followup.send(f"🎉 **{interaction.user.display_name}** est maintenant propriétaire du canal !", ephemeral=True)
+                
+                # Send public message to channel
+                embed = discord.Embed(
+                    title="👑 Nouveau Propriétaire",
+                    description=f"**{interaction.user.display_name}** a pris possession du canal !",
+                    color=0x00ff00
+                )
+                try:
+                    await rate_limiter.safe_send(channel, embed=embed)
+                except discord.Forbidden:
+                    pass
+                
+                # Clean up claim system
+                await self.cog.cleanup_claim_system(self.channel_id)
+                
+                self.stop()
+            else:
+                await interaction.followup.send("❌ Erreur lors de la revendication de propriété.", ephemeral=True)
+                
+        except discord.InteractionResponded:
+            # If interaction was already responded to, try with followup
+            try:
+                await interaction.followup.send("❌ Une erreur s'est produite.", ephemeral=True)
+            except Exception:
+                pass
+        except Exception as e:
+            logging.error(f"Error in claim_ownership: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Une erreur s'est produite.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ Une erreur s'est produite.", ephemeral=True)
+            except Exception:
+                pass
 
 async def setup(bot):
     await bot.add_cog(TemporaryChannels(bot))

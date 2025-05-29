@@ -29,8 +29,13 @@ class BumpReminder(commands.Cog):
         self.reminder_active = False
         self.france_tz = pytz.timezone('Europe/Paris')
         
-        # Cache pour les utilisateurs qui ont utilisé /bump récemment
+        # Cache renforcé pour les utilisateurs qui ont utilisé /bump récemment
         self.recent_bump_users = {}  # {timestamp: user}
+        self.pending_bumps = {}  # {user_id: {'timestamp': time, 'user': user_obj}}
+        self.bump_interactions = {}  # {interaction_id: {'user': user, 'timestamp': time}}
+        
+        # Cache pour les dernières interactions Disboard
+        self.last_disboard_interactions = []  # Liste des dernières interactions pour correlation
         
         # Utilisation du rate limiter avancé
         self.rate_limiter = get_rate_limiter()
@@ -96,13 +101,31 @@ class BumpReminder(commands.Cog):
         except Exception as e:
             logging.error(f"Erreur sauvegarde: {e}")
             
-    def clean_old_bump_users(self):
-        """Nettoie le cache des utilisateurs de bump (garde seulement les 10 dernières minutes)"""
-        cutoff_time = datetime.utcnow() - timedelta(minutes=10)
+    def clean_old_caches(self):
+        """Nettoie tous les caches (garde 20 minutes)"""
+        cutoff_time = datetime.utcnow() - timedelta(minutes=20)
+        cutoff_timestamp = time.time() - 1200  # 20 minutes
+        
+        # Nettoie recent_bump_users
         self.recent_bump_users = {
             timestamp: user for timestamp, user in self.recent_bump_users.items()
             if timestamp > cutoff_time
         }
+        
+        # Nettoie pending_bumps
+        self.pending_bumps = {
+            user_id: data for user_id, data in self.pending_bumps.items()
+            if data['timestamp'] > cutoff_timestamp
+        }
+        
+        # Nettoie bump_interactions
+        self.bump_interactions = {
+            interaction_id: data for interaction_id, data in self.bump_interactions.items()
+            if data['timestamp'] > cutoff_timestamp
+        }
+        
+        # Nettoie last_disboard_interactions (garde seulement les 10 dernières)
+        self.last_disboard_interactions = self.last_disboard_interactions[-10:]
             
     async def get_guild_safe(self) -> Optional[discord.Guild]:
         """Récupère le serveur avec cache et gestion d'erreurs"""
@@ -394,26 +417,93 @@ class BumpReminder(commands.Cog):
             return False
         
     def find_most_recent_bump_user(self, disboard_message_time):
-        """Trouve l'utilisateur qui a fait le bump le plus récemment avant le message Disboard"""
-        self.clean_old_bump_users()
+        """Trouve l'utilisateur qui a fait le bump avec méthodes améliorées"""
+        self.clean_old_caches()
         
-        # Recherche l'utilisateur le plus récent avant le message Disboard
-        recent_user = None
+        # Convertit le temps du message Disboard en UTC pour comparaison
+        if disboard_message_time.tzinfo is not None:
+            disboard_utc = disboard_message_time.astimezone(pytz.UTC).replace(tzinfo=None)
+        else:
+            disboard_utc = disboard_message_time
+        
+        logging.info(f"🔍 Recherche utilisateur bump pour message Disboard à {disboard_utc}")
+        logging.info(f"📋 Cache - recent_bump_users: {len(self.recent_bump_users)}, pending_bumps: {len(self.pending_bumps)}, bump_interactions: {len(self.bump_interactions)}")
+        
+        # Méthode 1: Cache des interactions bump récentes (fenêtre plus large)
+        best_candidate = None
         best_time_diff = None
         
         for timestamp, user in self.recent_bump_users.items():
-            time_diff = disboard_message_time - timestamp
+            time_diff = disboard_utc - timestamp
+            logging.info(f"   🔸 recent_bump_users - {user}: {timestamp} → diff: {time_diff}")
             
-            # Doit être avant le message Disboard et dans les 5 dernières minutes
-            if timedelta(0) <= time_diff <= timedelta(minutes=5):
-                if best_time_diff is None or time_diff < best_time_diff:
+            # Fenêtre élargie: de -60 secondes à +15 minutes
+            if timedelta(seconds=-60) <= time_diff <= timedelta(minutes=15):
+                if best_time_diff is None or abs(time_diff.total_seconds()) < abs(best_time_diff.total_seconds()):
                     best_time_diff = time_diff
-                    recent_user = user
+                    best_candidate = user
+                    logging.info(f"   ✅ Nouveau meilleur candidat via recent_bump_users: {user} (diff: {time_diff})")
         
-        if recent_user:
-            logging.info(f"✅ Utilisateur bump trouvé via cache: {recent_user} (il y a {best_time_diff})")
+        if best_candidate:
+            logging.info(f"✅ Utilisateur trouvé via recent_bump_users: {best_candidate} (diff: {best_time_diff})")
+            return best_candidate
         
-        return recent_user
+        # Méthode 2: Cache des pending bumps (converti en datetime pour comparaison)
+        for user_id, data in self.pending_bumps.items():
+            pending_timestamp = datetime.utcfromtimestamp(data['timestamp'])
+            time_diff = disboard_utc - pending_timestamp
+            logging.info(f"   🔸 pending_bumps - ID{user_id}: {pending_timestamp} → diff: {time_diff}")
+            
+            # Fenêtre élargie pour pending bumps
+            if timedelta(seconds=-60) <= time_diff <= timedelta(minutes=15):
+                if best_time_diff is None or abs(time_diff.total_seconds()) < abs(best_time_diff.total_seconds()):
+                    best_time_diff = time_diff
+                    best_candidate = data['user']
+                    logging.info(f"   ✅ Nouveau meilleur candidat via pending_bumps: {best_candidate} (diff: {time_diff})")
+        
+        if best_candidate:
+            logging.info(f"✅ Utilisateur trouvé via pending_bumps: {best_candidate} (diff: {best_time_diff})")
+            return best_candidate
+        
+        # Méthode 3: Cache des interactions par ID
+        for interaction_id, data in self.bump_interactions.items():
+            interaction_timestamp = datetime.utcfromtimestamp(data['timestamp'])
+            time_diff = disboard_utc - interaction_timestamp
+            logging.info(f"   🔸 bump_interactions - {interaction_id}: {interaction_timestamp} → diff: {time_diff}")
+            
+            if timedelta(seconds=-60) <= time_diff <= timedelta(minutes=15):
+                if best_time_diff is None or abs(time_diff.total_seconds()) < abs(best_time_diff.total_seconds()):
+                    best_time_diff = time_diff
+                    best_candidate = data['user']
+                    logging.info(f"   ✅ Nouveau meilleur candidat via bump_interactions: {best_candidate} (diff: {time_diff})")
+        
+        if best_candidate:
+            logging.info(f"✅ Utilisateur trouvé via bump_interactions: {best_candidate} (diff: {best_time_diff})")
+            return best_candidate
+        
+        # Méthode 4: Recherche dans les dernières interactions Disboard
+        for interaction_data in self.last_disboard_interactions[-5:]:  # Les 5 dernières
+            interaction_timestamp = datetime.utcfromtimestamp(interaction_data['timestamp'])
+            time_diff = disboard_utc - interaction_timestamp
+            logging.info(f"   🔸 last_disboard_interactions - {interaction_data['user']}: {interaction_timestamp} → diff: {time_diff}")
+            
+            if timedelta(seconds=-60) <= time_diff <= timedelta(minutes=15):
+                if best_time_diff is None or abs(time_diff.total_seconds()) < abs(best_time_diff.total_seconds()):
+                    best_time_diff = time_diff
+                    best_candidate = interaction_data['user']
+                    logging.info(f"   ✅ Nouveau meilleur candidat via last_disboard_interactions: {best_candidate} (diff: {time_diff})")
+        
+        if best_candidate:
+            logging.info(f"✅ Utilisateur trouvé via last_disboard_interactions: {best_candidate} (diff: {best_time_diff})")
+            return best_candidate
+        
+        logging.warning(f"❌ Aucun utilisateur bump trouvé pour le message à {disboard_utc}")
+        logging.info(f"📊 État des caches:")
+        logging.info(f"   - recent_bump_users: {[(t.strftime('%H:%M:%S'), u.display_name) for t, u in sorted(self.recent_bump_users.items(), reverse=True)]}")
+        logging.info(f"   - pending_bumps: {[(uid, data['user'].display_name, datetime.utcfromtimestamp(data['timestamp']).strftime('%H:%M:%S')) for uid, data in self.pending_bumps.items()]}")
+        logging.info(f"   - bump_interactions: {[(iid, data['user'].display_name, datetime.utcfromtimestamp(data['timestamp']).strftime('%H:%M:%S')) for iid, data in self.bump_interactions.items()]}")
+        
+        return None
         
     async def handle_successful_bump(self, bump_user):
         """Gère un bump réussi"""
@@ -496,29 +586,79 @@ class BumpReminder(commands.Cog):
             
     @commands.Cog.listener()
     async def on_interaction(self, interaction):
-        """Capture les interactions slash commands pour détecter /bump"""
+        """Version améliorée pour capturer les interactions"""
         try:
-            # Vérifie si c'est une commande slash bump dans le bon serveur et canal
-            if (interaction.type == discord.InteractionType.application_command and
-                interaction.guild and interaction.guild.id == self.guild_id and
-                interaction.channel_id == self.incantations_channel_id):
+            # Log toutes les interactions pour debug si nécessaire
+            if interaction.guild and interaction.guild.id == self.guild_id:
                 
-                # Vérifie si c'est la commande bump de Disboard
-                if (hasattr(interaction, 'data') and interaction.data and
-                    interaction.data.get('name') == 'bump' and
-                    getattr(interaction, 'application_id', None) == self.disboard_id):
+                # Vérifie si c'est une interaction de commande
+                if interaction.type == discord.InteractionType.application_command:
                     
-                    # Stocke l'utilisateur avec timestamp
-                    timestamp = datetime.utcnow()
-                    self.recent_bump_users[timestamp] = interaction.user
+                    # CORRECTION IMPORTANTE: Pour les slash commands, utilise interaction.user
+                    user = interaction.user  # C'est l'utilisateur qui a exécuté la commande
+                    current_time = time.time()
                     
-                    # Nettoie le cache
-                    self.clean_old_bump_users()
+                    # Debug logging pour toutes les commandes dans le serveur
+                    command_name = interaction.data.get('name', 'Unknown') if hasattr(interaction, 'data') and interaction.data else 'Unknown'
+                    app_id = getattr(interaction, 'application_id', 'Unknown')
                     
-                    logging.info(f"✅ Commande /bump détectée de {interaction.user} à {timestamp}")
+                    logging.info(f"🔍 Slash command détectée: /{command_name} par {user} (App: {app_id}) dans #{interaction.channel.name if interaction.channel else 'Unknown'}")
                     
+                    # Spécifiquement pour la commande bump de Disboard
+                    if (command_name == 'bump' and 
+                        interaction.channel_id == self.incantations_channel_id):
+                        
+                        # Stockage sécurisé avec vérifications
+                        timestamp = datetime.utcnow()
+                        
+                        # Vérifie que c'est bien Disboard (optionnel car parfois app_id peut différer)
+                        is_disboard = app_id == self.disboard_id
+                        
+                        # Stocke quand même car parfois l'app_id peut varier
+                        logging.info(f"💾 Stockage interaction bump: {user} - Disboard vérifié: {is_disboard}")
+                        
+                        # Triple stockage pour fiabilité
+                        self.recent_bump_users[timestamp] = user
+                        
+                        self.pending_bumps[user.id] = {
+                            'timestamp': current_time,
+                            'user': user,
+                            'verified_disboard': is_disboard
+                        }
+                        
+                        if hasattr(interaction, 'id'):
+                            self.bump_interactions[str(interaction.id)] = {
+                                'user': user,
+                                'timestamp': current_time,
+                                'command': command_name,
+                                'app_id': app_id
+                            }
+                        
+                        # Stockage général des interactions bump
+                        self.last_disboard_interactions.append({
+                            'user': user,
+                            'timestamp': current_time,
+                            'interaction_id': getattr(interaction, 'id', None),
+                            'channel_id': interaction.channel_id,
+                            'command': command_name,
+                            'app_id': app_id,
+                            'verified_disboard': is_disboard
+                        })
+                        
+                        # Limite les interactions stockées
+                        if len(self.last_disboard_interactions) > 20:
+                            self.last_disboard_interactions = self.last_disboard_interactions[-15:]
+                        
+                        # Nettoie les caches
+                        self.clean_old_caches()
+                        
+                        logging.info(f"✅ Interaction /bump stockée: {user} (ID: {user.id}) à {timestamp}")
+                        
         except Exception as e:
-            logging.error(f"Erreur capture interaction bump: {e}")
+            logging.error(f"Erreur capture interaction: {e}")
+            logging.error(f"Type interaction: {getattr(interaction, 'type', 'Unknown')}")
+            logging.error(f"Guild: {getattr(interaction, 'guild', 'None')}")
+            logging.error(f"User: {getattr(interaction, 'user', 'None')}")
         
     async def cog_load(self):
         """Chargement du module"""
@@ -639,16 +779,16 @@ class BumpReminder(commands.Cog):
                     await self.rate_limiter.safe_delete(message)
                     return
                 
-                logging.info(f"Bump détecté dans {message.channel.name}")
+                logging.info(f"💥 Bump détecté dans {message.channel.name} à {message.created_at}")
                 
-                # Trouve l'utilisateur qui a bumpé via le cache des interactions
+                # Trouve l'utilisateur qui a bumpé via les méthodes multiples
                 bump_user = self.find_most_recent_bump_user(message.created_at)
                 
                 if bump_user:
-                    logging.info(f"✅ Utilisateur qui a bumpé trouvé: {bump_user}")
+                    logging.info(f"✅ Utilisateur qui a bumpé identifié: {bump_user}")
                     await self.handle_successful_bump(bump_user)
                 else:
-                    logging.warning("Impossible de trouver l'utilisateur qui a bumpé")
+                    logging.warning("⚠️ Impossible de trouver l'utilisateur qui a bumpé")
                     # Met à jour quand même le temps
                     self.last_bump_time = datetime.utcnow()
                     self.last_general_reminder_time = None
@@ -670,7 +810,7 @@ class BumpReminder(commands.Cog):
     @commands.command(name='bump_debug')
     @commands.has_permissions(administrator=True)
     async def debug_bump(self, ctx):
-        """Affiche les informations de debug"""
+        """Affiche les informations de debug améliorées"""
         time_since = self.time_since_last_bump()
         time_since_general = self.time_since_last_general_reminder()
         time_since_personal = self.time_since_last_personal_reminder()
@@ -682,12 +822,23 @@ class BumpReminder(commands.Cog):
         # Récupère les métriques du rate limiter
         metrics = self.rate_limiter.get_metrics()
         
-        # Nettoie et affiche le cache des utilisateurs de bump
-        self.clean_old_bump_users()
+        # Nettoie et affiche les caches
+        self.clean_old_caches()
+        
+        # Formate les caches pour l'affichage
         recent_users_str = ", ".join([f"{user.display_name} ({timestamp.strftime('%H:%M:%S')})" 
                                      for timestamp, user in sorted(self.recent_bump_users.items(), reverse=True)])
         
-        debug_info = f"""**🔧 Debug Bump System**
+        pending_bumps_str = ", ".join([f"{data['user'].display_name} ({datetime.utcfromtimestamp(data['timestamp']).strftime('%H:%M:%S')})" 
+                                      for user_id, data in self.pending_bumps.items()])
+        
+        bump_interactions_str = ", ".join([f"{data['user'].display_name} ({datetime.utcfromtimestamp(data['timestamp']).strftime('%H:%M:%S')})" 
+                                          for interaction_id, data in self.bump_interactions.items()])
+        
+        disboard_interactions_str = ", ".join([f"{data['user'].display_name} ({datetime.utcfromtimestamp(data['timestamp']).strftime('%H:%M:%S')})" 
+                                              for data in self.last_disboard_interactions[-5:]])
+        
+        debug_info = f"""**🔧 Debug Bump System (Corrigé)**
 
 **État:**
 • Système initialisé: `{self.initialized}`
@@ -696,9 +847,18 @@ class BumpReminder(commands.Cog):
 • Message de rappel personnel: `{bool(self.personal_reminder_message)}`
 • Membres actifs en cache: `{len(self._recent_active_members)}`
 
-**Cache Bump Users:**
-• Utilisateurs récents: `{len(self.recent_bump_users)}`
-• Détails: `{recent_users_str or 'Aucun'}`
+**Caches Bump (Multi-niveaux):**
+• **recent_bump_users:** `{len(self.recent_bump_users)}`
+  `{recent_users_str[:200]}{'...' if len(recent_users_str) > 200 else ''}`
+
+• **pending_bumps:** `{len(self.pending_bumps)}`
+  `{pending_bumps_str[:200]}{'...' if len(pending_bumps_str) > 200 else ''}`
+
+• **bump_interactions:** `{len(self.bump_interactions)}`
+  `{bump_interactions_str[:200]}{'...' if len(bump_interactions_str) > 200 else ''}`
+
+• **last_disboard_interactions:** `{len(self.last_disboard_interactions)}`
+  `{disboard_interactions_str[:200]}{'...' if len(disboard_interactions_str) > 200 else ''}`
 
 **Rate Limiter:**
 • Requêtes totales: `{metrics['total_requests']}`
@@ -721,9 +881,73 @@ class BumpReminder(commands.Cog):
 • Guild ID: `{self.guild_id}`
 • Channel rappel: `{self.bump_reminder_channel_id}`
 • Channel incantations: `{self.incantations_channel_id}`
+• Disboard ID: `{self.disboard_id}`
 """
         
-        await ctx.send(debug_info)
+        # Divise le message si trop long
+        if len(debug_info) > 2000:
+            parts = [debug_info[i:i+1900] for i in range(0, len(debug_info), 1900)]
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await ctx.send(part)
+                else:
+                    await ctx.send(f"**Debug Bump (suite {i+1})**\n" + part)
+        else:
+            await ctx.send(debug_info)
+
+    @commands.command(name='bump_test_interaction')
+    @commands.has_permissions(administrator=True)
+    async def test_interaction_detection(self, ctx):
+        """Teste la détection d'interactions pour debug"""
+        
+        embed = discord.Embed(
+            title="🔧 Test Détection Interactions", 
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(
+            name="Méthode Correcte - Slash Commands",
+            value="✅ `interaction.user` - Utilisateur qui exécute la slash command",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="Méthode Incorrecte",
+            value="❌ `interaction.message.author` - Donne l'ID du bot qui répond",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="État Actuel du Cache",
+            value=f"• Recent bump users: {len(self.recent_bump_users)}\n"
+                  f"• Pending bumps: {len(self.pending_bumps)}\n"
+                  f"• Bump interactions: {len(self.bump_interactions)}\n"
+                  f"• Last Disboard interactions: {len(self.last_disboard_interactions)}",
+            inline=False
+        )
+        
+        # Affiche les dernières interactions capturées
+        if self.last_disboard_interactions:
+            recent_interactions = []
+            for interaction_data in self.last_disboard_interactions[-3:]:
+                timestamp_str = datetime.utcfromtimestamp(interaction_data['timestamp']).strftime('%H:%M:%S')
+                recent_interactions.append(f"• {interaction_data['user'].display_name} à {timestamp_str}")
+            
+            embed.add_field(
+                name="Dernières Interactions Capturées",
+                value="\n".join(recent_interactions) if recent_interactions else "Aucune",
+                inline=False
+            )
+        
+        embed.add_field(
+            name="Configuration",
+            value=f"• Guild ID: {self.guild_id}\n"
+                  f"• Canal Incantations: {self.incantations_channel_id}\n"
+                  f"• Disboard ID: {self.disboard_id}",
+            inline=False
+        )
+        
+        await ctx.send(embed=embed)
             
     @commands.command(name='bump_init')
     @commands.has_permissions(administrator=True)
@@ -773,6 +997,9 @@ class BumpReminder(commands.Cog):
         self.last_personal_reminder_time = None
         self.reminder_active = False
         self.recent_bump_users.clear()
+        self.pending_bumps.clear()
+        self.bump_interactions.clear()
+        self.last_disboard_interactions.clear()
         self.save_data()
         if self.bump_message:
             await self.rate_limiter.safe_delete(self.bump_message)
