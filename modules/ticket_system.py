@@ -8,6 +8,7 @@ import asyncio
 import pytz
 from datetime import datetime, timedelta
 from typing import Dict, Set, Tuple, Optional, List
+from .rate_limiter import get_rate_limiter, safe_api_call
 
 # Load env from parent directory
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
@@ -25,37 +26,8 @@ ORACLE_ROLE_ID = 1345472801364246528    # Oracle
 # Timezone configuration
 PARIS_TZ = pytz.timezone('Europe/Paris')
 
-# Rate limiting configuration
-MAX_HISTORY_LIMIT = 300
-API_DELAY = 0.7
-MAX_RETRIES = 3
-RETRY_DELAY = 5
-
-async def safe_api_call(coro, delay=API_DELAY, max_retries=MAX_RETRIES):
-    """Enhanced wrapper for API calls with comprehensive rate limit handling"""
-    for attempt in range(max_retries):
-        try:
-            await asyncio.sleep(delay)
-            return await coro
-        except discord.HTTPException as e:
-            if e.status == 429:  # Rate limited
-                retry_after = getattr(e, 'retry_after', 5)
-                wait_time = retry_after + 1 + (attempt * 2)  # Exponential backoff
-                print(f"Rate limited, waiting {wait_time}s (attempt {attempt + 1})")
-                await asyncio.sleep(wait_time)
-                if attempt == max_retries - 1:
-                    raise
-            elif e.status == 404:  # Not found - channel already deleted
-                return None
-            else:
-                if attempt == max_retries - 1:
-                    raise
-                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise
-            await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-    return None
+# Get the rate limiter instance
+rate_limiter = get_rate_limiter()
 
 async def init_cleanup_db():
     """Initialize cleanup tracking database"""
@@ -149,23 +121,23 @@ async def perform_cleanup(guild, cleanup_record):
         if voice_id:
             voice_channel = guild.get_channel(voice_id)
             if voice_channel:
-                result = await safe_api_call(voice_channel.delete(), delay=1.0)
-                if result is None:
-                    # Check if channel still exists after deletion attempt
-                    voice_channel = guild.get_channel(voice_id)
-                    if voice_channel:  # Still exists, deletion failed
-                        success = False
+                try:
+                    await rate_limiter.safe_channel_delete(voice_channel)
+                except discord.NotFound:
+                    pass  # Already deleted
+                except Exception:
+                    success = False
         
         # Delete ticket text channel (most important)
         if ticket_id and success:
             ticket_channel = guild.get_channel(ticket_id)
             if ticket_channel:
-                result = await safe_api_call(ticket_channel.delete(), delay=1.0)
-                if result is None:
-                    # Check if channel still exists after deletion attempt
-                    ticket_channel = guild.get_channel(ticket_id)
-                    if ticket_channel:  # Still exists, deletion failed
-                        success = False
+                try:
+                    await rate_limiter.safe_channel_delete(ticket_channel)
+                except discord.NotFound:
+                    pass  # Already deleted
+                except Exception:
+                    success = False
         
         if success:
             await mark_cleanup_completed(cleanup_id)
@@ -253,12 +225,14 @@ class TicketButtons(discord.ui.View):
                 if roles['seigneur']:
                     overwrites[roles['seigneur']] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-            # Create channel
-            ticket_channel = await safe_api_call(category.create_text_channel(
+            # Create channel with rate limiting
+            ticket_channel = await rate_limiter.safe_channel_create(
+                guild,
                 name=f"ticket-{ticket_number}",
+                category=category,
                 topic=f"ticket-{interaction.user.id}",
                 overwrites=overwrites
-            ))
+            )
 
             # Build embed and ping text
             paris_time = datetime.now(PARIS_TZ).strftime("%d/%m/%Y à %H:%M")
@@ -290,7 +264,7 @@ class TicketButtons(discord.ui.View):
             embed.set_footer(text=f"Ticket #{ticket_number} • {guild.name}")
 
             view = TicketManagementView()
-            await safe_api_call(ticket_channel.send(data['ping'], embed=embed, view=view))
+            await rate_limiter.safe_send(ticket_channel, data['ping'], embed=embed, view=view)
             
             await interaction.followup.send(f"✅ **Votre ticket a été créé avec succès !**\n\n📍 **Lien :** {ticket_channel.mention}\n🎫 **Numéro :** #{ticket_number}\n\nUn membre du staff vous contactera sous peu.", ephemeral=True)
 
@@ -322,7 +296,7 @@ class TicketManagementView(discord.ui.View):
         
         # Update topic in background
         try:
-            await safe_api_call(interaction.channel.edit(topic=f"{interaction.channel.topic}|taken_charge"))
+            await rate_limiter.safe_channel_edit(interaction.channel, topic=f"{interaction.channel.topic}|taken_charge")
         except Exception as e:
             print(f"Erreur lors de la mise à jour du topic: {e}")
 
@@ -361,25 +335,30 @@ class TicketManagementView(discord.ui.View):
                         connect=True, speak=True, view_channel=True
                     )
             
-            # Create voice channel
-            voice_channel = await safe_api_call(category.create_voice_channel(
-                name=ticket_channel.name,
-                overwrites=voice_overwrites
-            ))
+            # Create voice channel with rate limiting
+            voice_channel = await rate_limiter.execute_request(
+                ticket_channel.guild.create_voice_channel(
+                    ticket_channel.name,
+                    category=category,
+                    overwrites=voice_overwrites
+                ),
+                route=f'POST /guilds/{ticket_channel.guild.id}/channels',
+                major_params={'guild_id': ticket_channel.guild.id}
+            )
             
             if voice_channel:
                 # Update topic
-                await safe_api_call(ticket_channel.edit(topic=f"{ticket_channel.topic}|voice-{voice_channel.id}"))
+                await rate_limiter.safe_channel_edit(ticket_channel, topic=f"{ticket_channel.topic}|voice-{voice_channel.id}")
                 
                 paris_time = datetime.now(PARIS_TZ).strftime("%d/%m/%Y à %H:%M")
-                await safe_api_call(ticket_channel.send(f"🔊 **Salon vocal créé:** {voice_channel.mention}\n📅 **Créé par:** {interaction.user.mention} ({paris_time})"))
+                await rate_limiter.safe_send(ticket_channel, f"🔊 **Salon vocal créé:** {voice_channel.mention}\n📅 **Créé par:** {interaction.user.mention} ({paris_time})")
             else:
-                await safe_api_call(ticket_channel.send("❌ Une erreur s'est produite lors de la création du salon vocal."))
+                await rate_limiter.safe_send(ticket_channel, "❌ Une erreur s'est produite lors de la création du salon vocal.")
             
         except Exception as e:
             print(f"Erreur lors de la création du vocal: {e}")
             try:
-                await safe_api_call(ticket_channel.send("❌ Une erreur s'est produite lors de la création du salon vocal."))
+                await rate_limiter.safe_send(ticket_channel, "❌ Une erreur s'est produite lors de la création du salon vocal.")
             except:
                 pass
 
@@ -417,7 +396,7 @@ class TicketManagementView(discord.ui.View):
             try:
                 # Fetch limited messages
                 messages = []
-                async for message in channel.history(limit=MAX_HISTORY_LIMIT, oldest_first=True):
+                async for message in channel.history(limit=300, oldest_first=True):
                     paris_timestamp = message.created_at.astimezone(PARIS_TZ).strftime("%d/%m/%Y %H:%M:%S")
                     content = message.content if message.content else "[Embed/Attachment]"
                     messages.append(f"[{paris_timestamp}] {message.author}: {content[:100]}...")
@@ -434,7 +413,7 @@ class TicketManagementView(discord.ui.View):
                     timestamp=datetime.now(PARIS_TZ)
                 )
                 embed.set_footer(text=f"Fermé par {closer}", icon_url=closer.display_avatar.url)
-                await safe_api_call(logs_channel.send(embed=embed))
+                await rate_limiter.safe_send(logs_channel, embed=embed)
                 
             except Exception as e:
                 print(f"Erreur lors de la sauvegarde des logs: {e}")
@@ -491,12 +470,14 @@ async def create_staff_ticket(guild, member, staff_member, reason=None):
         if role:
             overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-    # Create channel
-    ticket_channel = await safe_api_call(category.create_text_channel(
+    # Create channel with rate limiting
+    ticket_channel = await rate_limiter.safe_channel_create(
+        guild,
         name=f"ticket-{ticket_number}",
+        category=category,
         topic=f"ticket-{member.id}",
         overwrites=overwrites
-    ))
+    )
 
     if not ticket_channel:
         return None, False
@@ -511,7 +492,7 @@ async def create_staff_ticket(guild, member, staff_member, reason=None):
     embed.set_footer(text=f"Ticket #{ticket_number}")
 
     view = TicketManagementView()
-    await safe_api_call(ticket_channel.send(f"{member.mention}", embed=embed, view=view))
+    await rate_limiter.safe_send(ticket_channel, f"{member.mention}", embed=embed, view=view)
     return ticket_channel, True
 
 async def setup_ticket_system(bot):
@@ -534,10 +515,10 @@ async def setup_ticket_system(bot):
         if existing_message:
             try:
                 view = TicketButtons()
-                await safe_api_call(existing_message.edit(view=view))
+                await rate_limiter.safe_edit(existing_message, view=view)
                 return
             except:
-                await safe_api_call(existing_message.delete())
+                await rate_limiter.safe_delete(existing_message)
         
         # Create new message
         embed = discord.Embed(
@@ -550,15 +531,17 @@ async def setup_ticket_system(bot):
         embed.add_field(name="⚖️ Contestation", value="Pour contester une sanction", inline=True)
         
         view = TicketButtons()
-        await safe_api_call(channel.send(embed=embed, view=view))
+        await rate_limiter.safe_send(channel, embed=embed, view=view)
 
 class TicketCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.cleanup_task.start()
+        self.rate_limit_cleanup.start()
 
     def cog_unload(self):
         self.cleanup_task.cancel()
+        self.rate_limit_cleanup.cancel()
 
     @tasks.loop(minutes=10)
     async def cleanup_task(self):
@@ -583,8 +566,17 @@ class TicketCog(commands.Cog):
         except Exception as e:
             print(f"Error in cleanup task: {e}")
 
+    @tasks.loop(minutes=30)
+    async def rate_limit_cleanup(self):
+        """Clean up expired rate limit buckets"""
+        await rate_limiter.cleanup_expired_buckets()
+
     @cleanup_task.before_loop
     async def before_cleanup_task(self):
+        await self.bot.wait_until_ready()
+
+    @rate_limit_cleanup.before_loop
+    async def before_rate_limit_cleanup(self):
         await self.bot.wait_until_ready()
 
     @commands.Cog.listener()
@@ -596,19 +588,21 @@ class TicketCog(commands.Cog):
     async def force_ticket(self, ctx, member: discord.Member, *, reason=None):
         ticket_channel, created = await create_staff_ticket(ctx.guild, member, ctx.author, reason)
         if created:
-            await ctx.send(f"✅ **Ticket créé:** {ticket_channel.mention}")
+            await rate_limiter.safe_send(ctx, f"✅ **Ticket créé:** {ticket_channel.mention}")
         else:
-            await ctx.send(f"❌ **Ticket existant:** {ticket_channel.mention}")
+            await rate_limiter.safe_send(ctx, f"❌ **Ticket existant:** {ticket_channel.mention}")
 
     @commands.command(name='ticketadd')
     @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
     async def add_user_to_ticket(self, ctx, member: discord.Member):
         if not ctx.channel.name.startswith('ticket-'):
-            await ctx.send("❌ **Commande uniquement dans un ticket.**")
+            await rate_limiter.safe_send(ctx, "❌ **Commande uniquement dans un ticket.**")
             return
         
-        await safe_api_call(ctx.channel.set_permissions(member, 
-            overwrite=discord.PermissionOverwrite(read_messages=True, send_messages=True)))
+        await rate_limiter.safe_channel_edit(ctx.channel, overwrites={
+            **ctx.channel.overwrites,
+            member: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        })
         
         # Update voice channel if exists
         if "|voice-" in ctx.channel.topic:
@@ -616,37 +610,69 @@ class TicketCog(commands.Cog):
                 voice_id = int(ctx.channel.topic.split("|voice-")[1].split("|")[0])
                 voice_channel = ctx.guild.get_channel(voice_id)
                 if voice_channel:
-                    await safe_api_call(voice_channel.set_permissions(member,
-                        overwrite=discord.PermissionOverwrite(connect=True, speak=True, view_channel=True)))
+                    await rate_limiter.safe_channel_edit(voice_channel, overwrites={
+                        **voice_channel.overwrites,
+                        member: discord.PermissionOverwrite(connect=True, speak=True, view_channel=True)
+                    })
             except:
                 pass
         
-        await ctx.send(f"✅ **{member.mention} ajouté au ticket**")
+        await rate_limiter.safe_send(ctx, f"✅ **{member.mention} ajouté au ticket**")
 
     @commands.command(name='ticketremove')
     @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
     async def remove_user_from_ticket(self, ctx, member: discord.Member):
         if not ctx.channel.name.startswith('ticket-'):
-            await ctx.send("❌ **Commande uniquement dans un ticket.**")
+            await rate_limiter.safe_send(ctx, "❌ **Commande uniquement dans un ticket.**")
             return
         
         ticket_owner_id = int(ctx.channel.topic.split("|")[0].replace('ticket-', ''))
         if member.id == ticket_owner_id:
-            await ctx.send("❌ **Impossible de retirer le propriétaire.**")
+            await rate_limiter.safe_send(ctx, "❌ **Impossible de retirer le propriétaire.**")
             return
         
-        await safe_api_call(ctx.channel.set_permissions(member, overwrite=None))
+        new_overwrites = ctx.channel.overwrites.copy()
+        if member in new_overwrites:
+            del new_overwrites[member]
+        
+        await rate_limiter.safe_channel_edit(ctx.channel, overwrites=new_overwrites)
         
         if "|voice-" in ctx.channel.topic:
             try:
                 voice_id = int(ctx.channel.topic.split("|voice-")[1].split("|")[0])
                 voice_channel = ctx.guild.get_channel(voice_id)
                 if voice_channel:
-                    await safe_api_call(voice_channel.set_permissions(member, overwrite=None))
+                    voice_overwrites = voice_channel.overwrites.copy()
+                    if member in voice_overwrites:
+                        del voice_overwrites[member]
+                    await rate_limiter.safe_channel_edit(voice_channel, overwrites=voice_overwrites)
             except:
                 pass
         
-        await ctx.send(f"✅ **{member.mention} retiré du ticket**")
+        await rate_limiter.safe_send(ctx, f"✅ **{member.mention} retiré du ticket**")
+
+    @commands.command(name='rate_limit_stats')
+    @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
+    async def rate_limit_stats(self, ctx):
+        """Check rate limiter statistics"""
+        try:
+            metrics = rate_limiter.get_metrics()
+            embed = discord.Embed(
+                title="📊 Statistiques Rate Limiter",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Requêtes totales", value=metrics['total_requests'], inline=True)
+            embed.add_field(name="Rate limited", value=f"{metrics['rate_limited_requests']} ({metrics['rate_limit_percentage']}%)", inline=True)
+            embed.add_field(name="Échecs", value=metrics['failed_requests'], inline=True)
+            embed.add_field(name="Tentatives retry", value=metrics['retry_attempts'], inline=True)
+            embed.add_field(name="Req/min moyenne", value=metrics['requests_per_minute'], inline=True)
+            embed.add_field(name="Buckets actifs", value=metrics['active_buckets'], inline=True)
+            embed.add_field(name="Temps moyen", value=f"{metrics['average_request_time']}s", inline=True)
+            embed.add_field(name="Global rate limited", value="✅" if metrics['global_rate_limited'] else "❌", inline=True)
+            
+            await rate_limiter.safe_send(ctx, embed=embed)
+        except Exception as e:
+            await rate_limiter.safe_send(ctx, f"❌ Erreur lors de la récupération des stats: {e}")
 
     @commands.command(name='cleanup_status')
     @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
@@ -672,9 +698,9 @@ class TicketCog(commands.Cog):
                     description="✅ **Aucun nettoyage en attente**",
                     color=discord.Color.green()
                 )
-            await ctx.send(embed=embed)
+            await rate_limiter.safe_send(ctx, embed=embed)
         except Exception as e:
-            await ctx.send(f"❌ Erreur lors de la vérification: {e}")
+            await rate_limiter.safe_send(ctx, f"❌ Erreur lors de la vérification: {e}")
 
     @discord.app_commands.command(name="ticket", description="Créer un ticket d'entretien")
     async def slash_ticket(self, interaction: discord.Interaction, member: discord.Member, reason: str = None):
@@ -708,8 +734,10 @@ class TicketCog(commands.Cog):
             await interaction.response.send_message("❌ Commande uniquement dans un ticket.", ephemeral=True)
             return
         
-        await safe_api_call(interaction.channel.set_permissions(member, 
-            overwrite=discord.PermissionOverwrite(read_messages=True, send_messages=True)))
+        await rate_limiter.safe_channel_edit(interaction.channel, overwrites={
+            **interaction.channel.overwrites,
+            member: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        })
         
         await interaction.response.send_message(f"✅ **{member.mention} ajouté au ticket**")
 
@@ -729,7 +757,11 @@ class TicketCog(commands.Cog):
             await interaction.response.send_message("❌ Impossible de retirer le propriétaire.", ephemeral=True)
             return
         
-        await safe_api_call(interaction.channel.set_permissions(member, overwrite=None))
+        new_overwrites = interaction.channel.overwrites.copy()
+        if member in new_overwrites:
+            del new_overwrites[member]
+        
+        await rate_limiter.safe_channel_edit(interaction.channel, overwrites=new_overwrites)
         await interaction.response.send_message(f"✅ **{member.mention} retiré du ticket**")
 
 async def setup(bot):
