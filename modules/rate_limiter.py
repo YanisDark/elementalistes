@@ -2,7 +2,7 @@
 import asyncio
 import aiohttp
 import discord
-from discord.http import HTTPClient, Route
+from discord.ext import commands
 import time
 import json
 import logging
@@ -144,17 +144,7 @@ class DiscordRateLimiter:
         shard_id: int = None,
         **kwargs
     ) -> Any:
-        """
-        Execute a Discord API request with proper rate limiting
-        
-        Args:
-            coro: Coroutine to execute (e.g., channel.send())
-            route: API route identifier (e.g., 'POST /channels/{channel_id}/messages')
-            major_params: Major parameters for bucket identification
-            max_retries: Maximum retry attempts
-            shard_id: Shard ID for sharded bots
-            **kwargs: Additional arguments passed to the coroutine
-        """
+        """Execute a Discord API request with proper rate limiting"""
         bucket_key = self._get_bucket_key(route, major_params, shard_id)
         
         for attempt in range(max_retries + 1):
@@ -419,3 +409,51 @@ class RateLimitContext:
     async def execute(self, coro):
         """Execute a coroutine within the rate limit context"""
         return await self.limiter.execute_request(coro, self.route, self.major_params)
+
+class RateLimiterCog(commands.Cog):
+    """Cog for rate limiter management commands"""
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.rate_limiter = get_rate_limiter()
+    
+    @commands.command(name='rate_stats')
+    @commands.has_permissions(administrator=True)
+    async def rate_stats(self, ctx):
+        """Show rate limiter statistics"""
+        try:
+            metrics = self.rate_limiter.get_metrics()
+            embed = discord.Embed(
+                title="📊 Statistiques Rate Limiter",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Requêtes totales", value=metrics['total_requests'], inline=True)
+            embed.add_field(name="Rate limited", value=f"{metrics['rate_limited_requests']} ({metrics['rate_limit_percentage']}%)", inline=True)
+            embed.add_field(name="Échecs", value=metrics['failed_requests'], inline=True)
+            embed.add_field(name="Tentatives retry", value=metrics['retry_attempts'], inline=True)
+            embed.add_field(name="Req/min moyenne", value=metrics['requests_per_minute'], inline=True)
+            embed.add_field(name="Buckets actifs", value=metrics['active_buckets'], inline=True)
+            embed.add_field(name="Temps moyen", value=f"{metrics['average_request_time']}s", inline=True)
+            embed.add_field(name="Global rate limited", value="✅" if metrics['global_rate_limited'] else "❌", inline=True)
+            
+            await ctx.send(embed=embed)
+        except Exception as e:
+            await ctx.send(f"❌ Erreur lors de la récupération des stats: {e}")
+    
+    @commands.command(name='rate_reset')
+    @commands.has_permissions(administrator=True)
+    async def rate_reset(self, ctx):
+        """Reset rate limiter metrics"""
+        self.rate_limiter.reset_metrics()
+        await ctx.send("✅ Métriques du rate limiter réinitialisées")
+    
+    @commands.command(name='rate_cleanup')
+    @commands.has_permissions(administrator=True)
+    async def rate_cleanup(self, ctx):
+        """Clean up expired rate limit buckets"""
+        await self.rate_limiter.cleanup_expired_buckets()
+        await ctx.send("✅ Nettoyage des buckets expiré effectué")
+
+async def setup(bot):
+    """Setup function required for discord.py extensions"""
+    await bot.add_cog(RateLimiterCog(bot))
