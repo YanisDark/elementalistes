@@ -221,8 +221,7 @@ class LoveCalc(commands.Cog):
         image_data = await self.create_love_image(author, target_user, percentage)
         file = discord.File(image_data, filename="lovecalc_result.png")
         
-        message = f"💘 **Calcul d'amour** 💘\n"
-        message += f"**{author.display_name}** 💕 **{target_user.display_name}**\n\n"
+        message = f"__**{author.display_name}**__ 💕 __**{target_user.display_name}**__\n\n"
         message += f"🎯 **Pourcentage d'amour : {percentage}%**\n"
         message += f"{comment}"
         
