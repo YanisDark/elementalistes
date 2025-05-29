@@ -7,21 +7,18 @@ import re
 import asyncio
 import os
 import aiosqlite
+import random
+from typing import Optional
+from .rate_limiter import get_rate_limiter
 
 class ModerationCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.paris_tz = pytz.timezone('Europe/Paris')
         self.db_path = "moderation.db"
-        self.cleanup_sanctions.start()
+        self.rate_limiter = get_rate_limiter()
         
-    async def cog_load(self):
-        await self.init_db()
-    
-    def cog_unload(self):
-        self.cleanup_sanctions.cancel()
-    
-    async def init_db(self):
+    async def setup_database(self):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS sanctions (
@@ -92,7 +89,10 @@ class ModerationCog(commands.Cog):
     
     @tasks.loop(hours=1)
     async def cleanup_sanctions(self):
-        await self.cleanup_expired_sanctions()
+        try:
+            await self.cleanup_expired_sanctions()
+        except Exception as e:
+            print(f"Error in cleanup_sanctions: {e}")
     
     @cleanup_sanctions.before_loop
     async def before_cleanup(self):
@@ -146,30 +146,108 @@ class ModerationCog(commands.Cog):
         member_roles = [role.id for role in member.roles]
         return any(role_id in member_roles for role_id in required_roles if role_id)
     
-    async def send_dm_notification(self, user, action, reason, duration=None, end_time=None):
+    async def send_dm_notification(self, user, action, reason=None, duration=None, end_time=None, is_lifted=False, warn_count=None):
         """Send DM notification to user in French"""
         try:
-            action_messages = {
-                "warn": f"⚠️ Vous avez reçu un avertissement sur le serveur Les Élémentalistes.\n**Raison :** {reason}\n\n*Les avertissements expirent automatiquement après 3 mois. 3 avertissements actifs résultent en un bannissement automatique.*",
-                "mute": f"🔇 Vous avez été mis en sourdine sur le serveur Les Élémentalistes.\n**Raison :** {reason}",
-                "tempban": f"🔨 Vous avez été banni temporairement du serveur Les Élémentalistes.\n**Raison :** {reason}",
-                "ban": f"🔨 Vous avez été banni définitivement du serveur Les Élémentalistes.\n**Raison :** {reason}",
-                "kick": f"👋 Vous avez été expulsé du serveur Les Élémentalistes.\n**Raison :** {reason}"
-            }
-            
-            message = action_messages.get(action, f"Action de modération : {action}\n**Raison :** {reason}")
-            
-            if duration and end_time:
-                duration_str = self.format_duration(duration)
-                end_time_paris = end_time.astimezone(self.paris_tz)
-                message += f"\n**Durée :** {duration_str}\n**Fin :** {end_time_paris.strftime('%d/%m/%Y à %H:%M')} (heure de Paris)"
+            if is_lifted:
+                action_messages = {
+                    "unmute": "🔊 Votre mise en sourdine sur le serveur Les Élémentalistes a été levée par un modérateur. Vous pouvez désormais participer aux conversations de nouveau.",
+                    "untimeout": "🔊 Votre timeout sur le serveur Les Élémentalistes a été levé par un modérateur. Vous pouvez désormais participer aux conversations de nouveau.",
+                    "unban": "🎉 Vous avez été débanni du serveur Les Élémentalistes par un administrateur. Vous êtes maintenant libre de rejoindre le serveur de nouveau."
+                }
+                
+                citations = [
+                    "*« Chaque fin est un nouveau commencement. »*",
+                    "*« Les erreurs d'hier sont les leçons d'aujourd'hui. »*",
+                    "*« Le pardon est la clé de la liberté. »*",
+                    "*« Une seconde chance est un cadeau précieux. »*",
+                    "*« La rédemption est toujours possible. »*"
+                ]
+                
+                message = action_messages.get(action, f"Votre sanction sur le serveur Les Élémentalistes a été levée.")
+                message += f"\n\n{random.choice(citations)}"
+                
+            else:
+                action_messages = {
+                    "warn": f"⚠️ Vous avez reçu un avertissement sur le serveur Les Élémentalistes pour la raison suivante : **{reason}**. Les avertissements expirent automatiquement après 3 mois, mais sachez que 3 avertissements actifs résultent en un bannissement automatique.",
+                    "mute": f"🔇 Vous avez été mis en sourdine sur le serveur Les Élémentalistes pour la raison suivante : **{reason}**. Pendant cette période, vous ne pourrez pas envoyer de messages dans les canaux du serveur.",
+                    "timeout": f"🔇 Vous avez été mis en timeout sur le serveur Les Élémentalistes pour la raison suivante : **{reason}**. Pendant cette période, vous ne pourrez pas envoyer de messages dans les canaux du serveur.",
+                    "ban": f"🔨 Vous avez été banni définitivement du serveur Les Élémentalistes pour la raison suivante : **{reason}**. Cette décision a été prise suite à un comportement inapproprié récurrent ou grave.",
+                    "kick": f"👋 Vous avez été expulsé du serveur Les Élémentalistes pour la raison suivante : **{reason}**. Vous pouvez rejoindre le serveur immédiatement si vous le souhaitez."
+                }
+                
+                # Snarky citations based on punishment severity
+                warn_citations = [
+                    "*« Félicitations, vous venez de (re)découvrir que les règles ne sont pas optionnelles. »*",
+                    "*« Apparemment, lire le règlement était trop compliqué. »*",
+                    "*« Voilà ce qui arrive quand on teste les limites... spoiler : elles existent. »*",
+                    "*« Peut-être qu'un petit rappel vous aidera à mieux vous comporter. »*",
+                    "*« Les avertissements, c'est comme les Pokemon : attrapez-les tous ! (Mais pas vraiment.) »*",
+                    "*« Première leçon gratuite : respecter les règles. »*"
+                ]
+                
+                mute_citations = [
+                    "*« Le silence est d'or, et vous venez de gagner le jackpot. »*",
+                    "*« Parfois, il vaut mieux se taire... voilà votre chance de l'apprendre. »*",
+                    "*« On vous offre une pause forcée pour réfléchir à vos choix de vie. »*",
+                    "*« Considérez ceci comme un stage de méditation obligatoire. »*",
+                    "*« Votre droit de parole a temporairement expiré. »*",
+                    "*« Temps de réflexion accordé gracieusement par la modération. »*",
+                    "*« Une petite pause s'impose, visiblement. »*"
+                ]
+                
+                kick_citations = [
+                    "*« Au revoir ! Fermez-bien la porte derrière vous, s'il vous plaît. »*",
+                    "*« Vous êtes libre de revenir... après avoir appris les bonnes manières. »*",
+                    "*« Expulsé ! Comme au football, mais sans le carton rouge. »*",
+                    "*« Prenez l'air, ça vous fera du bien. Au serveur aussi. »*",
+                    "*« Désolé, mais votre comportement n'est pas compatible avec notre serveur. »*",
+                    "*« Direction la sortie ! Revenez quand vous serez plus sage. »*",
+                    "*« Sortie express accordée ! Profitez-en pour réfléchir. »*"
+                ]
+                
+                ban_citations = [
+                    "*« Félicitations ! Vous venez de remporter un bannissement permanent. Quel talent ! »*",
+                    "*« Votre comportement était si remarquable qu'on a décidé de vous offrir une sortie définitive. »*",
+                    "*« Bannissement permanent : parce que certaines personnes ne méritent pas de troisième chance. »*",
+                    "*« Au revoir et... eh bien, juste au revoir en fait. »*",
+                    "*« Vous avez réussi l'exploit de vous faire bannir définitivement. Bravo ! »*",
+                    "*« Succès déverrouillé : bannissement permanent ! Quelle prouesse ! »*",
+                    "*« Votre comportement était tellement exceptionnel qu'on vous accorde un bannissement d'honneur. »*"
+                ]
+                
+                citations_map = {
+                    "warn": warn_citations,
+                    "mute": mute_citations,
+                    "timeout": mute_citations,
+                    "kick": kick_citations,
+                    "ban": ban_citations
+                }
+                
+                citations = citations_map.get(action, warn_citations)
+                message = action_messages.get(action, f"Action de modération sur le serveur Les Élémentalistes pour la raison suivante : **{reason}**.")
+                
+                if action == "warn" and warn_count is not None:
+                    message += f" Vous avez maintenant **{warn_count}/3 avertissements actifs**."
+                
+                if duration and end_time:
+                    duration_str = self.format_duration(duration)
+                    end_time_paris = end_time.astimezone(self.paris_tz)
+                    message += f" Cette sanction durera {duration_str} et prendra fin le {end_time_paris.strftime('%d/%m/%Y à %H:%M')} (heure de Paris)."
+                
+                message += f"\n\n{random.choice(citations)}"
             
             await user.send(message)
         except discord.Forbidden:
             pass  # User has DMs disabled
-    
-    @commands.slash_command(name="warn", description="Avertir un utilisateur")
-    async def warn(self, ctx, user: discord.Member, *, reason: str):
+
+    # Slash commands
+    @discord.app_commands.command(name="warn", description="Avertir un utilisateur")
+    @discord.app_commands.describe(
+        user="L'utilisateur à avertir",
+        reason="Raison de l'avertissement"
+    )
+    async def warn_slash(self, interaction: discord.Interaction, user: discord.Member, reason: str):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         moderator_role = os.getenv('MODERATOR_ROLE_ID')
         
@@ -179,125 +257,132 @@ class ModerationCog(commands.Cog):
         if moderator_role and moderator_role != 'your_moderator_role_id':
             required_roles.append(int(moderator_role))
         
-        if not self.has_permission(ctx.author, required_roles):
-            await ctx.respond("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+        if not self.has_permission(interaction.user, required_roles):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         if user.bot:
-            await ctx.respond("❌ Impossible d'avertir un bot.", ephemeral=True)
+            await interaction.response.send_message("❌ Impossible d'avertir un bot.", ephemeral=True)
             return
         
-        # Send DM before applying punishment
-        await self.send_dm_notification(user, "warn", reason)
+        await interaction.response.defer()
         
-        # Add to database
-        sanction_id = await self.add_sanction(user.id, ctx.author.id, ctx.guild.id, "warn", reason)
+        # Add to database first to get the new count
+        sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "warn", reason)
         
-        # Check warn count
-        warn_count = await self.get_active_warns(user.id, ctx.guild.id)
+        # Check warn count after adding the new warning
+        warn_count = await self.get_active_warns(user.id, interaction.guild.id)
+        
+        # Send DM with warning count
+        await self.send_dm_notification(user, "warn", reason, warn_count=warn_count)
         
         if warn_count >= 3:
             # Auto ban
             try:
-                await user.ban(reason=f"3 avertissements atteints - Dernier avertissement: {reason}")
-                await self.add_sanction(user.id, self.bot.user.id, ctx.guild.id, "ban", "3 avertissements atteints")
-                await ctx.respond(f"⚠️ {user.mention} a été averti (ID: {sanction_id}) et **banni automatiquement** pour avoir atteint 3 avertissements.")
+                await self.rate_limiter.safe_ban(interaction.guild, user, reason=f"3 avertissements atteints - Dernier avertissement: {reason}")
+                await self.add_sanction(user.id, self.bot.user.id, interaction.guild.id, "ban", "3 avertissements atteints")
+                await interaction.followup.send(f"⚠️ {user.mention} a été averti (ID: {sanction_id}) et **banni automatiquement** pour avoir atteint 3 avertissements.")
             except discord.Forbidden:
-                await ctx.respond(f"⚠️ {user.mention} a été averti (ID: {sanction_id}) mais je n'ai pas pu le bannir automatiquement.")
+                await interaction.followup.send(f"⚠️ {user.mention} a été averti (ID: {sanction_id}) mais je n'ai pas pu le bannir automatiquement.")
         else:
-            await ctx.respond(f"⚠️ {user.mention} a été averti (ID: {sanction_id}). **{warn_count}/3 avertissements actifs**.")
+            await interaction.followup.send(f"⚠️ {user.mention} a été averti (ID: {sanction_id}). **{warn_count}/3 avertissements actifs**.")
     
-    @commands.slash_command(name="mute", description="Mettre en sourdine un utilisateur")
-    async def mute(self, ctx, user: discord.Member, duration: str, *, reason: str):
+    @discord.app_commands.command(name="mute", description="Mettre en sourdine un utilisateur")
+    @discord.app_commands.describe(
+        user="L'utilisateur à mettre en sourdine",
+        duration="Durée (ex: 1h30m, 2d, 30s)",
+        reason="Raison de la mise en sourdine"
+    )
+    async def mute_slash(self, interaction: discord.Interaction, user: discord.Member, duration: str, reason: str):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         moderator_role = os.getenv('MODERATOR_ROLE_ID')
         oracle_role = os.getenv('ORACLE_ROLE_ID')
-        animator_role = os.getenv('ANIMATOR_ROLE_ID')
         
         required_roles = []
-        for role in [admin_role, moderator_role, oracle_role, animator_role]:
+        for role in [admin_role, moderator_role, oracle_role]:
             if role and not role.startswith('your_'):
                 required_roles.append(int(role))
         
-        if not self.has_permission(ctx.author, required_roles):
-            await ctx.respond("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+        if not self.has_permission(interaction.user, required_roles):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         duration_seconds = self.parse_duration(duration)
         if not duration_seconds:
-            await ctx.respond("❌ Format de durée invalide. Exemples: 1h30m, 2d, 30s", ephemeral=True)
+            await interaction.response.send_message("❌ Format de durée invalide. Exemples: 1h30m, 2d, 30s", ephemeral=True)
             return
         
         if user.bot:
-            await ctx.respond("❌ Impossible de mettre en sourdine un bot.", ephemeral=True)
+            await interaction.response.send_message("❌ Impossible de mettre en sourdine un bot.", ephemeral=True)
             return
+        
+        await interaction.response.defer()
         
         end_time = datetime.now() + timedelta(seconds=duration_seconds)
         
         # Send DM before applying punishment
         await self.send_dm_notification(user, "mute", reason, duration_seconds, end_time)
         
-        # Apply Discord timeout
+        # Apply Discord timeout using rate limiter
         try:
-            await user.timeout(until=discord.utils.utcnow() + timedelta(seconds=duration_seconds), reason=reason)
-            sanction_id = await self.add_sanction(user.id, ctx.author.id, ctx.guild.id, "mute", reason, duration_seconds)
-            await ctx.respond(f"🔇 {user.mention} a été mis en sourdine pour {self.format_duration(duration_seconds)} (ID: {sanction_id}).")
+            timeout_until = discord.utils.utcnow() + timedelta(seconds=duration_seconds)
+            await self.rate_limiter.safe_member_edit(user, timed_out_until=timeout_until, reason=reason)
+            sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "mute", reason, duration_seconds)
+            await interaction.followup.send(f"🔇 {user.mention} a été mis en sourdine pour {self.format_duration(duration_seconds)} (ID: {sanction_id}).")
         except discord.Forbidden:
-            await ctx.respond("❌ Je n'ai pas la permission de mettre cet utilisateur en sourdine.")
+            await interaction.followup.send("❌ Je n'ai pas la permission de mettre cet utilisateur en sourdine.")
     
-    @commands.slash_command(name="timeout", description="Mettre en timeout un utilisateur")
-    async def timeout(self, ctx, user: discord.Member, duration: str, *, reason: str):
-        await self.mute(ctx, user, duration, reason=reason)
-    
-    @commands.slash_command(name="tempban", description="Bannir temporairement un utilisateur")
-    async def tempban(self, ctx, user: discord.Member, duration: str, *, reason: str):
+    @discord.app_commands.command(name="timeout", description="Mettre en timeout un utilisateur")
+    @discord.app_commands.describe(
+        user="L'utilisateur à mettre en timeout",
+        duration="Durée (ex: 1h30m, 2d, 30s)",
+        reason="Raison du timeout"
+    )
+    async def timeout_slash(self, interaction: discord.Interaction, user: discord.Member, duration: str, reason: str):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         moderator_role = os.getenv('MODERATOR_ROLE_ID')
+        oracle_role = os.getenv('ORACLE_ROLE_ID')
         
         required_roles = []
-        if admin_role and admin_role != 'your_admin_role_id':
-            required_roles.append(int(admin_role))
-        if moderator_role and moderator_role != 'your_moderator_role_id':
-            required_roles.append(int(moderator_role))
+        for role in [admin_role, moderator_role, oracle_role]:
+            if role and not role.startswith('your_'):
+                required_roles.append(int(role))
         
-        if not self.has_permission(ctx.author, required_roles):
-            await ctx.respond("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+        if not self.has_permission(interaction.user, required_roles):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         duration_seconds = self.parse_duration(duration)
         if not duration_seconds:
-            await ctx.respond("❌ Format de durée invalide. Exemples: 1h30m, 2d, 30s", ephemeral=True)
+            await interaction.response.send_message("❌ Format de durée invalide. Exemples: 1h30m, 2d, 30s", ephemeral=True)
             return
         
         if user.bot:
-            await ctx.respond("❌ Impossible de bannir un bot.", ephemeral=True)
+            await interaction.response.send_message("❌ Impossible de mettre en timeout un bot.", ephemeral=True)
             return
+        
+        await interaction.response.defer()
         
         end_time = datetime.now() + timedelta(seconds=duration_seconds)
         
         # Send DM before applying punishment
-        await self.send_dm_notification(user, "tempban", reason, duration_seconds, end_time)
+        await self.send_dm_notification(user, "timeout", reason, duration_seconds, end_time)
         
+        # Apply Discord timeout using rate limiter
         try:
-            await user.ban(reason=reason)
-            sanction_id = await self.add_sanction(user.id, ctx.author.id, ctx.guild.id, "tempban", reason, duration_seconds)
-            await ctx.respond(f"🔨 {user.mention} a été banni temporairement pour {self.format_duration(duration_seconds)} (ID: {sanction_id}).")
-            
-            # Schedule unban
-            asyncio.create_task(self._schedule_unban(ctx.guild, user, duration_seconds))
-            
+            timeout_until = discord.utils.utcnow() + timedelta(seconds=duration_seconds)
+            await self.rate_limiter.safe_member_edit(user, timed_out_until=timeout_until, reason=reason)
+            sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "timeout", reason, duration_seconds)
+            await interaction.followup.send(f"🔇 {user.mention} a été mis en timeout pour {self.format_duration(duration_seconds)} (ID: {sanction_id}).")
         except discord.Forbidden:
-            await ctx.respond("❌ Je n'ai pas la permission de bannir cet utilisateur.")
+            await interaction.followup.send("❌ Je n'ai pas la permission de mettre cet utilisateur en timeout.")
     
-    async def _schedule_unban(self, guild, user, duration_seconds):
-        await asyncio.sleep(duration_seconds)
-        try:
-            await guild.unban(user, reason="Fin du bannissement temporaire")
-        except:
-            pass
-    
-    @commands.slash_command(name="ban", description="Bannir définitivement un utilisateur")
-    async def ban(self, ctx, user: discord.Member, *, reason: str):
+    @discord.app_commands.command(name="ban", description="Bannir définitivement un utilisateur")
+    @discord.app_commands.describe(
+        user="L'utilisateur à bannir définitivement",
+        reason="Raison du bannissement"
+    )
+    async def ban_slash(self, interaction: discord.Interaction, user: discord.Member, reason: str):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         moderator_role = os.getenv('MODERATOR_ROLE_ID')
         
@@ -307,26 +392,32 @@ class ModerationCog(commands.Cog):
         if moderator_role and moderator_role != 'your_moderator_role_id':
             required_roles.append(int(moderator_role))
         
-        if not self.has_permission(ctx.author, required_roles):
-            await ctx.respond("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+        if not self.has_permission(interaction.user, required_roles):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         if user.bot:
-            await ctx.respond("❌ Impossible de bannir un bot.", ephemeral=True)
+            await interaction.response.send_message("❌ Impossible de bannir un bot.", ephemeral=True)
             return
+        
+        await interaction.response.defer()
         
         # Send DM before applying punishment
         await self.send_dm_notification(user, "ban", reason)
         
         try:
-            await user.ban(reason=reason)
-            sanction_id = await self.add_sanction(user.id, ctx.author.id, ctx.guild.id, "ban", reason)
-            await ctx.respond(f"🔨 {user.mention} a été banni définitivement (ID: {sanction_id}).")
+            await self.rate_limiter.safe_ban(interaction.guild, user, reason=reason)
+            sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "ban", reason)
+            await interaction.followup.send(f"🔨 {user.mention} a été banni définitivement (ID: {sanction_id}).")
         except discord.Forbidden:
-            await ctx.respond("❌ Je n'ai pas la permission de bannir cet utilisateur.")
+            await interaction.followup.send("❌ Je n'ai pas la permission de bannir cet utilisateur.")
     
-    @commands.slash_command(name="kick", description="Expulser un utilisateur")
-    async def kick(self, ctx, user: discord.Member, *, reason: str):
+    @discord.app_commands.command(name="kick", description="Expulser un utilisateur")
+    @discord.app_commands.describe(
+        user="L'utilisateur à expulser",
+        reason="Raison de l'expulsion"
+    )
+    async def kick_slash(self, interaction: discord.Interaction, user: discord.Member, reason: str):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         moderator_role = os.getenv('MODERATOR_ROLE_ID')
         
@@ -336,118 +427,159 @@ class ModerationCog(commands.Cog):
         if moderator_role and moderator_role != 'your_moderator_role_id':
             required_roles.append(int(moderator_role))
         
-        if not self.has_permission(ctx.author, required_roles):
-            await ctx.respond("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+        if not self.has_permission(interaction.user, required_roles):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         if user.bot:
-            await ctx.respond("❌ Impossible d'expulser un bot.", ephemeral=True)
+            await interaction.response.send_message("❌ Impossible d'expulser un bot.", ephemeral=True)
             return
+        
+        await interaction.response.defer()
         
         # Send DM before applying punishment
         await self.send_dm_notification(user, "kick", reason)
         
         try:
-            await user.kick(reason=reason)
-            sanction_id = await self.add_sanction(user.id, ctx.author.id, ctx.guild.id, "kick", reason)
-            await ctx.respond(f"👋 {user.mention} a été expulsé (ID: {sanction_id}).")
+            await self.rate_limiter.safe_kick(user, reason=reason)
+            sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "kick", reason)
+            await interaction.followup.send(f"👋 {user.mention} a été expulsé (ID: {sanction_id}).")
         except discord.Forbidden:
-            await ctx.respond("❌ Je n'ai pas la permission d'expulser cet utilisateur.")
+            await interaction.followup.send("❌ Je n'ai pas la permission d'expulser cet utilisateur.")
     
-    @commands.slash_command(name="unmute", description="Lever la sourdine d'un utilisateur")
-    async def unmute(self, ctx, user: discord.Member):
+    @discord.app_commands.command(name="unmute", description="Lever la sourdine d'un utilisateur")
+    @discord.app_commands.describe(
+        user="L'utilisateur dont lever la sourdine"
+    )
+    async def unmute_slash(self, interaction: discord.Interaction, user: discord.Member):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         moderator_role = os.getenv('MODERATOR_ROLE_ID')
         oracle_role = os.getenv('ORACLE_ROLE_ID')
-        animator_role = os.getenv('ANIMATOR_ROLE_ID')
         
         required_roles = []
-        for role in [admin_role, moderator_role, oracle_role, animator_role]:
+        for role in [admin_role, moderator_role, oracle_role]:
             if role and not role.startswith('your_'):
                 required_roles.append(int(role))
         
-        if not self.has_permission(ctx.author, required_roles):
-            await ctx.respond("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+        if not self.has_permission(interaction.user, required_roles):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         try:
-            await user.timeout(until=None)
-            await ctx.respond(f"🔊 {user.mention} n'est plus en sourdine.")
+            await self.rate_limiter.safe_member_edit(user, timed_out_until=None, reason=f"Démute par {interaction.user}")
+            await self.send_dm_notification(user, "unmute", is_lifted=True)
+            await interaction.response.send_message(f"🔊 {user.mention} n'est plus en sourdine.")
         except discord.Forbidden:
-            await ctx.respond("❌ Je n'ai pas la permission de lever la sourdine de cet utilisateur.")
+            await interaction.response.send_message("❌ Je n'ai pas la permission de lever la sourdine de cet utilisateur.")
     
-    @commands.slash_command(name="untimeout", description="Lever le timeout d'un utilisateur")
-    async def untimeout(self, ctx, user: discord.Member):
-        await self.unmute(ctx, user)
+    @discord.app_commands.command(name="untimeout", description="Lever le timeout d'un utilisateur")
+    @discord.app_commands.describe(
+        user="L'utilisateur dont lever le timeout"
+    )
+    async def untimeout_slash(self, interaction: discord.Interaction, user: discord.Member):
+        admin_role = os.getenv('ADMIN_ROLE_ID')
+        moderator_role = os.getenv('MODERATOR_ROLE_ID')
+        oracle_role = os.getenv('ORACLE_ROLE_ID')
+        
+        required_roles = []
+        for role in [admin_role, moderator_role, oracle_role]:
+            if role and not role.startswith('your_'):
+                required_roles.append(int(role))
+        
+        if not self.has_permission(interaction.user, required_roles):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+            return
+        
+        try:
+            await self.rate_limiter.safe_member_edit(user, timed_out_until=None, reason=f"Timeout levé par {interaction.user}")
+            await self.send_dm_notification(user, "untimeout", is_lifted=True)
+            await interaction.response.send_message(f"🔊 {user.mention} n'est plus en timeout.")
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ Je n'ai pas la permission de lever le timeout de cet utilisateur.")
     
-    @commands.slash_command(name="unban", description="Débannir un utilisateur")
-    async def unban(self, ctx, user_id: str):
+    @discord.app_commands.command(name="unban", description="Débannir un utilisateur")
+    @discord.app_commands.describe(
+        user_id="L'ID de l'utilisateur à débannir"
+    )
+    async def unban_slash(self, interaction: discord.Interaction, user_id: str):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         
         if not admin_role or admin_role == 'your_admin_role_id':
-            await ctx.respond("❌ Rôle admin non configuré.", ephemeral=True)
+            await interaction.response.send_message("❌ Rôle admin non configuré.", ephemeral=True)
             return
         
-        if not self.has_permission(ctx.author, [int(admin_role)]):
-            await ctx.respond("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+        if not self.has_permission(interaction.user, [int(admin_role)]):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         try:
             user_id = int(user_id)
             user = await self.bot.fetch_user(user_id)
-            await ctx.guild.unban(user, reason=f"Débanni par {ctx.author}")
-            await ctx.respond(f"✅ {user.mention} a été débanni.")
+            await self.rate_limiter.safe_unban(interaction.guild, user)
+            await self.send_dm_notification(user, "unban", is_lifted=True)
+            await interaction.response.send_message(f"✅ {user.mention} a été débanni.")
         except ValueError:
-            await ctx.respond("❌ ID utilisateur invalide.")
+            await interaction.response.send_message("❌ ID utilisateur invalide.")
         except discord.NotFound:
-            await ctx.respond("❌ Utilisateur non trouvé ou non banni.")
+            await interaction.response.send_message("❌ Utilisateur non trouvé ou non banni.")
         except discord.Forbidden:
-            await ctx.respond("❌ Je n'ai pas la permission de débannir cet utilisateur.")
+            await interaction.response.send_message("❌ Je n'ai pas la permission de débannir cet utilisateur.")
 
-    sanctions = discord.SlashCommandGroup("sanctions", "Gestion des sanctions")
-    
-    @sanctions.command(name="list", description="Afficher les sanctions d'un utilisateur")
-    async def sanctions_list(self, ctx, user: discord.Member):
+    @discord.app_commands.command(name="sanctions", description="Afficher les sanctions d'un utilisateur")
+    @discord.app_commands.describe(
+        user="L'utilisateur dont afficher les sanctions"
+    )
+    async def sanctions_slash(self, interaction: discord.Interaction, user: discord.Member):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         moderator_role = os.getenv('MODERATOR_ROLE_ID')
         oracle_role = os.getenv('ORACLE_ROLE_ID')
-        animator_role = os.getenv('ANIMATOR_ROLE_ID')
         
         required_roles = []
-        for role in [admin_role, moderator_role, oracle_role, animator_role]:
+        for role in [admin_role, moderator_role, oracle_role]:
             if role and not role.startswith('your_'):
                 required_roles.append(int(role))
         
-        if not self.has_permission(ctx.author, required_roles):
-            await ctx.respond("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+        if not self.has_permission(interaction.user, required_roles):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
-        sanctions = await self.get_user_sanctions(user.id, ctx.guild.id, active_only=False)
+        sanctions = await self.get_user_sanctions(user.id, interaction.guild.id, active_only=False)
         view = SanctionsView(sanctions, user)
-        await ctx.respond(embed=view.get_embed(), view=view)
+        await interaction.response.send_message(embed=view.get_embed(), view=view)
     
-    @sanctions.command(name="remove", description="Supprimer une sanction par son ID")
-    async def sanctions_remove(self, ctx, user: discord.Member, sanction_id: int):
+    @discord.app_commands.command(name="remove_sanction", description="Supprimer une sanction par son ID")
+    @discord.app_commands.describe(
+        user="L'utilisateur concerné",
+        sanction_id="L'ID de la sanction à supprimer"
+    )
+    async def remove_sanction_slash(self, interaction: discord.Interaction, user: discord.Member, sanction_id: int):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         
         if not admin_role or admin_role == 'your_admin_role_id':
-            await ctx.respond("❌ Rôle admin non configuré.", ephemeral=True)
+            await interaction.response.send_message("❌ Rôle admin non configuré.", ephemeral=True)
             return
         
-        if not self.has_permission(ctx.author, [int(admin_role)]):
-            await ctx.respond("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+        if not self.has_permission(interaction.user, [int(admin_role)]):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         # Verify sanction exists and belongs to the user
-        sanctions = await self.get_user_sanctions(user.id, ctx.guild.id, active_only=False)
+        sanctions = await self.get_user_sanctions(user.id, interaction.guild.id, active_only=False)
         sanction_found = any(sanction[0] == sanction_id for sanction in sanctions)
         
         if not sanction_found:
-            await ctx.respond(f"❌ Aucune sanction trouvée avec l'ID {sanction_id} pour {user.mention}.", ephemeral=True)
+            await interaction.response.send_message(f"❌ Aucune sanction trouvée avec l'ID {sanction_id} pour {user.mention}.", ephemeral=True)
             return
         
         await self.remove_sanction(sanction_id)
-        await ctx.respond(f"✅ Sanction ID {sanction_id} supprimée pour {user.mention}.")
+        await interaction.response.send_message(f"✅ Sanction ID {sanction_id} supprimée pour {user.mention}.")
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        await self.setup_database()
+        # Start cleanup task after database is ready
+        if not self.cleanup_sanctions.is_running():
+            self.cleanup_sanctions.start()
 
 class SanctionsView(discord.ui.View):
     def __init__(self, sanctions, user, per_page=5):
@@ -529,5 +661,5 @@ class SanctionsView(discord.ui.View):
         else:
             await interaction.response.defer()
 
-def setup(bot):
-    bot.add_cog(ModerationCog(bot))
+async def setup(bot):
+    await bot.add_cog(ModerationCog(bot))
