@@ -10,15 +10,14 @@ import random
 import asyncio
 from PIL import Image, ImageDraw
 from typing import Optional, Union
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from rate_limiter import get_rate_limiter
+from .rate_limiter import get_rate_limiter
 
 class LoveCalc(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db_path = "lovecalc.db"
         self.rate_limiter = get_rate_limiter()
+        self.error_messages = {}  # Track error messages for cleanup
         
     async def setup_database(self):
         """Initialize database table if not exists"""
@@ -182,6 +181,26 @@ class LoveCalc(commands.Cog):
         members = [member for member in ctx.guild.members if not member.bot and member.id != exclude_user.id]
         return random.choice(members) if members else None
     
+    async def safe_delete_after_delay(self, message: discord.Message, delay: float):
+        """Safely delete a message after a delay"""
+        try:
+            await asyncio.sleep(delay)
+            # Check if message still exists and we can access it
+            if message.id in self.error_messages:
+                try:
+                    # Try to fetch the message to see if it still exists
+                    await message.channel.fetch_message(message.id)
+                    await message.delete()
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    # Message already deleted or no permission
+                    pass
+                finally:
+                    # Remove from tracking
+                    self.error_messages.pop(message.id, None)
+        except Exception:
+            # Silently fail to avoid internal errors
+            self.error_messages.pop(message.id, None)
+    
     @commands.command(name='lovecalc', aliases=['amour', 'lc'])
     @commands.cooldown(1, 30, commands.BucketType.user)
     async def lovecalc_prefix(self, ctx, *, args=""):
@@ -319,19 +338,19 @@ class LoveCalc(commands.Cog):
                 await ctx.reinvoke()
                 return
             
-            # Send message in channel and delete after cooldown
+            # Send message in channel and schedule deletion
             try:
                 error_msg = await self.rate_limiter.safe_send(
                     ctx.channel,
                     f"⏰ {ctx.author.mention}, tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !"
                 )
                 
-                # Delete the message after the cooldown period
-                await asyncio.sleep(error.retry_after)
-                try:
-                    await self.rate_limiter.safe_delete(error_msg)
-                except (discord.NotFound, discord.HTTPException):
-                    pass
+                # Track the message for cleanup
+                if error_msg:
+                    self.error_messages[error_msg.id] = error_msg
+                    # Schedule safe deletion
+                    asyncio.create_task(self.safe_delete_after_delay(error_msg, error.retry_after))
+                    
             except Exception:
                 # If rate limiter fails, don't show error message
                 pass
