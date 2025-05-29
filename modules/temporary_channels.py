@@ -7,8 +7,12 @@ from dotenv import load_dotenv
 import asyncio
 import logging
 import json
+from .rate_limiter import get_rate_limiter, safe_api_call
 
 load_dotenv()
+
+# Get the rate limiter instance
+rate_limiter = get_rate_limiter()
 
 class TemporaryChannels(commands.Cog):
     def __init__(self, bot):
@@ -21,9 +25,11 @@ class TemporaryChannels(commands.Cog):
     async def cog_load(self):
         await self.init_db()
         self.cleanup_task.start()
+        self.rate_limit_cleanup.start()
         
     async def cog_unload(self):
         self.cleanup_task.cancel()
+        self.rate_limit_cleanup.cancel()
         
     async def init_db(self):
         async with aiosqlite.connect(self.db_path) as db:
@@ -106,10 +112,19 @@ class TemporaryChannels(commands.Cog):
             )
         }
         
-        channel = await category.create_voice_channel(
-            name=channel_name,
-            overwrites=overwrites
+        # Create voice channel with rate limiting
+        channel = await rate_limiter.execute_request(
+            category.create_voice_channel(
+                name=channel_name,
+                overwrites=overwrites
+            ),
+            route=f'POST /guilds/{guild.id}/channels',
+            major_params={'guild_id': guild.id}
         )
+        
+        if not channel:
+            logging.error("Failed to create temporary voice channel")
+            return
         
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
@@ -118,7 +133,12 @@ class TemporaryChannels(commands.Cog):
             )
             await db.commit()
         
-        await member.move_to(channel)
+        # Move member with rate limiting
+        await rate_limiter.execute_request(
+            member.move_to(channel),
+            route=f'PATCH /guilds/{guild.id}/members/{member.id}',
+            major_params={'guild_id': guild.id}
+        )
         
         # Wait a moment for the channel to be fully created
         await asyncio.sleep(1)
@@ -258,15 +278,16 @@ class TemporaryChannels(commands.Cog):
             # Check if we already have a control message for this channel
             if channel.id in self.control_messages:
                 try:
-                    await self.control_messages[channel.id].edit(embed=embed, view=view)
+                    await rate_limiter.safe_edit(self.control_messages[channel.id], embed=embed, view=view)
                     return
                 except (discord.NotFound, discord.HTTPException):
                     # Message was deleted, remove from cache
                     del self.control_messages[channel.id]
             
             # Send new message
-            message = await channel.send(embed=embed, view=view)
-            self.control_messages[channel.id] = message
+            message = await rate_limiter.safe_send(channel, embed=embed, view=view)
+            if message:
+                self.control_messages[channel.id] = message
             
         except discord.Forbidden:
             # Fallback to COMMANDES_ADMIN if can't send to voice channel
@@ -275,8 +296,9 @@ class TemporaryChannels(commands.Cog):
                 admin_channel = channel.guild.get_channel(admin_channel_id)
                 if admin_channel:
                     embed.add_field(name="🎯 Canal Concerné", value=f"{channel.name} ({channel.id})", inline=False)
-                    message = await admin_channel.send(embed=embed, view=view)
-                    self.control_messages[channel.id] = message
+                    message = await rate_limiter.safe_send(admin_channel, embed=embed, view=view)
+                    if message:
+                        self.control_messages[channel.id] = message
             logging.error(f"Cannot send message to voice channel {channel.id}")
         except Exception as e:
             logging.error(f"Error sending control embed: {e}")
@@ -313,14 +335,14 @@ class TemporaryChannels(commands.Cog):
             )
             view = ClaimOwnershipView(self, channel.id)
             try:
-                await channel.send(embed=embed, view=view)
+                await rate_limiter.safe_send(channel, embed=embed, view=view)
             except discord.Forbidden:
                 admin_channel_id = int(os.getenv('COMMANDES_ADMIN_CHANNEL_ID', 0))
                 if admin_channel_id:
                     admin_channel = channel.guild.get_channel(admin_channel_id)
                     if admin_channel:
                         embed.add_field(name="🎯 Canal", value=f"{channel.name} ({channel.id})", inline=False)
-                        await admin_channel.send(embed=embed, view=view)
+                        await rate_limiter.safe_send(admin_channel, embed=embed, view=view)
         elif len(channel.members) == 0:
             await self.delete_temp_channel(channel.id)
     
@@ -332,7 +354,7 @@ class TemporaryChannels(commands.Cog):
         channel = self.bot.get_channel(channel_id)
         if channel:
             try:
-                await channel.delete()
+                await rate_limiter.safe_channel_delete(channel)
             except (discord.NotFound, discord.Forbidden):
                 pass
         
@@ -350,6 +372,19 @@ class TemporaryChannels(commands.Cog):
             channel = self.bot.get_channel(channel_id)
             if not channel or len(channel.members) == 0:
                 await self.delete_temp_channel(channel_id)
+
+    @tasks.loop(minutes=30)
+    async def rate_limit_cleanup(self):
+        """Clean up expired rate limit buckets"""
+        await rate_limiter.cleanup_expired_buckets()
+
+    @cleanup_task.before_loop
+    async def before_cleanup_task(self):
+        await self.bot.wait_until_ready()
+
+    @rate_limit_cleanup.before_loop
+    async def before_rate_limit_cleanup(self):
+        await self.bot.wait_until_ready()
 
 class ChannelControlView(discord.ui.View):
     def __init__(self, cog, channel_id, owner_id, current_type, soundboards_enabled):
@@ -491,7 +526,7 @@ class ChannelControlView(discord.ui.View):
             message = await self.cog.bot.wait_for('message', check=check, timeout=60.0)
             await self.process_user_list(interaction, message.content, 'whitelist')
             try:
-                await message.delete()
+                await rate_limiter.safe_delete(message)
             except discord.NotFound:
                 pass
         except asyncio.TimeoutError:
@@ -510,7 +545,7 @@ class ChannelControlView(discord.ui.View):
             message = await self.cog.bot.wait_for('message', check=check, timeout=60.0)
             await self.process_user_list(interaction, message.content, 'blacklist')
             try:
-                await message.delete()
+                await rate_limiter.safe_delete(message)
             except discord.NotFound:
                 pass
         except asyncio.TimeoutError:
@@ -529,7 +564,7 @@ class ChannelControlView(discord.ui.View):
             message = await self.cog.bot.wait_for('message', check=check, timeout=60.0)
             await self.process_user_removal(interaction, message.content)
             try:
-                await message.delete()
+                await rate_limiter.safe_delete(message)
             except discord.NotFound:
                 pass
         except asyncio.TimeoutError:
@@ -548,7 +583,7 @@ class ChannelControlView(discord.ui.View):
             message = await self.cog.bot.wait_for('message', check=check, timeout=60.0)
             await self.transfer_ownership_process(interaction, message.content)
             try:
-                await message.delete()
+                await rate_limiter.safe_delete(message)
             except discord.NotFound:
                 pass
         except asyncio.TimeoutError:
@@ -585,7 +620,10 @@ class ChannelControlView(discord.ui.View):
                 else:
                     # Disabled: Explicitly deny
                     overwrites.use_soundboard = False
-                await channel.set_permissions(member, overwrite=overwrites)
+                await rate_limiter.safe_channel_edit(channel, overwrites={
+                    **channel.overwrites,
+                    member: overwrites
+                })
         
         self.soundboards_enabled = new_state
         await interaction.response.send_message(
@@ -756,11 +794,15 @@ class ChannelControlView(discord.ui.View):
                 )
                 if member in channel.members:
                     try:
-                        await member.move_to(None)
+                        await rate_limiter.execute_request(
+                            member.move_to(None),
+                            route=f'PATCH /guilds/{guild.id}/members/{member.id}',
+                            major_params={'guild_id': guild.id}
+                        )
                     except discord.HTTPException:
                         pass
         
-        await channel.edit(overwrites=overwrites)
+        await rate_limiter.safe_channel_edit(channel, overwrites=overwrites)
         await self.apply_soundboard_permissions()
     
     async def apply_soundboard_permissions(self):
@@ -779,7 +821,11 @@ class ChannelControlView(discord.ui.View):
             else:
                 # Disabled: Explicitly deny
                 overwrites.use_soundboard = False
-            await channel.set_permissions(member, overwrite=overwrites)
+            await rate_limiter.execute_request(
+                channel.set_permissions(member, overwrite=overwrites),
+                route=f'PUT /channels/{channel.id}/permissions/{member.id}',
+                major_params={'channel_id': channel.id}
+            )
     
     async def process_user_list(self, interaction, content, list_type):
         user_ids = []
@@ -949,7 +995,11 @@ class ChannelControlView(discord.ui.View):
             old_owner = guild.get_member(self.owner_id)
             
             if old_owner:
-                await channel.set_permissions(old_owner, overwrite=None)
+                await rate_limiter.execute_request(
+                    channel.set_permissions(old_owner, overwrite=None),
+                    route=f'PUT /channels/{channel.id}/permissions/{old_owner.id}',
+                    major_params={'channel_id': channel.id}
+                )
             
             overwrites = discord.PermissionOverwrite(
                 manage_channels=True,
@@ -958,7 +1008,11 @@ class ChannelControlView(discord.ui.View):
                 view_channel=True,
                 use_soundboard=True
             )
-            await channel.set_permissions(new_owner, overwrite=overwrites)
+            await rate_limiter.execute_request(
+                channel.set_permissions(new_owner, overwrite=overwrites),
+                route=f'PUT /channels/{channel.id}/permissions/{new_owner.id}',
+                major_params={'channel_id': channel.id}
+            )
         
         self.owner_id = user_id
         await interaction.followup.send(f"👑 Propriété transférée avec succès à **{new_owner.display_name}** !", ephemeral=True)
@@ -998,7 +1052,11 @@ class ClaimOwnershipView(discord.ui.View):
             view_channel=True,
             use_soundboard=True
         )
-        await channel.set_permissions(interaction.user, overwrite=overwrites)
+        await rate_limiter.execute_request(
+            channel.set_permissions(interaction.user, overwrite=overwrites),
+            route=f'PUT /channels/{channel.id}/permissions/{interaction.user.id}',
+            major_params={'channel_id': channel.id}
+        )
         
         await interaction.response.send_message(f"🎉 **{interaction.user.display_name}** est maintenant propriétaire du canal !")
         await self.cog.send_control_embed(channel, interaction.user.id)
