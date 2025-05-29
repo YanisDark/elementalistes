@@ -9,12 +9,14 @@ import os
 from typing import Optional, Dict, List, Tuple
 import json
 import math
+from .rate_limiter import get_rate_limiter
 
 class LevelingSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db_path = "leveling_system.db"
         self.db_ready = False
+        self.rate_limiter = get_rate_limiter()
         
         # Configuration
         self.config = {
@@ -36,26 +38,28 @@ class LevelingSystem(commands.Cog):
                 int(os.getenv('BUMP_ROLE_ID', 0)): 0.25          # 1.25x total
             },
             
-            # Level rewards (every 10 levels) - Role IDs
+            # Level rewards - Role IDs
             "level_rewards": {
-                10: 1377682365115011093,  # Élémentaliste Novice
-                20: 1377682365115011093,  # Élémentaliste Apprenti
-                30: 1377682365115011093,  # Élémentaliste Confirmé
-                40: 1377682365115011093,  # Élémentaliste Expert
-                50: 1377682365115011093   # Maître Élémentaliste
+                1: 1345482254364704870,  # Sbires
+                5: 1345483379700924537,  # Affranchis
+                15: 1345483304031486042,  # Eveillés
+                30: 1345483304031486042,  # Mages
+                50: 1345483217209266267,   # Prodiges
+                70: 1345483167704023094
             },
             
             # Reward messages (configurable)
             "reward_messages": {
-                10: "🌟 {user} vient de débloquer le rang **Élémentaliste Novice** ! Les éléments commencent à répondre à ton appel...",
-                20: "⚡ {user} a atteint le rang **Élémentaliste Apprenti** ! Ta maîtrise des éléments s'améliore...",
-                30: "🔥 {user} est maintenant un **Élémentaliste Confirmé** ! Les éléments dansent sous tes ordres...",
-                40: "💎 {user} devient un **Élémentaliste Expert** ! Peu peuvent rivaliser avec ta maîtrise élémentaire...",
-                50: "👑 {user} a atteint le rang suprême de **Maître Élémentaliste** ! Tu es devenu un avec les éléments !"
+                1: "🌟 {user} est devenu un authentique **👤 Sbire** ! Ne t'en fais pas, tu vas avancer !",
+                5: "⚡ {user} est désormais un **✨ Affranchi** !",
+                15: "🔥 {user} est maintenant un **🔥 Éveillé** ! Tu commence à savoir utiliser la magie...",
+                30: "💎 {user} devient un **🧙 Mage** ! La puissance des éléments n'a plus de secrets pour toi...",
+                50: "👑 {user} est exceptionnel et devient un **⚡ Prodige** ! Tu deviens très fort !",
+                70: "👑 {user} a atteint le niveau ultime en devenant un **🌀 Élémentaliste** ! Tu ne fais qu'un avec les éléments !"
             },
             
             # Whether to remove previous level rewards when getting a higher one
-            "remove_previous_rewards": False
+            "remove_previous_rewards": True
         }
         
         # Cache pour les cooldowns et temps vocal
@@ -191,7 +195,7 @@ class LevelingSystem(commands.Cog):
             
             # Vérifier les récompenses de niveau (seulement si niveau augmenté)
             if new_level > old_level:
-                await self.check_level_rewards(user_id, old_level, new_level)
+                asyncio.create_task(self.check_level_rewards(user_id, old_level, new_level))
             
             return old_level, new_level, exp_gain
         except Exception as e:
@@ -213,6 +217,79 @@ class LevelingSystem(commands.Cog):
     def calculate_exp_from_activity(self, messages: int, voice_minutes: int) -> int:
         """Calcule l'EXP total basé sur les messages et temps vocal"""
         return (messages * self.config['exp_per_message']) + (voice_minutes * self.config['exp_per_voice_minute'])
+
+    async def safe_add_role(self, member: discord.Member, role: discord.Role, reason: str = None):
+        """Ajoute un rôle de manière sécurisée avec rate limiting"""
+        try:
+            return await self.rate_limiter.execute_request(
+                member.add_roles(role, reason=reason),
+                route=f'PATCH /guilds/{member.guild.id}/members/{member.id}',
+                major_params={'guild_id': member.guild.id}
+            )
+        except discord.Forbidden:
+            print(f"❌ Pas la permission d'attribuer le rôle {role.name}")
+        except discord.NotFound:
+            print(f"❌ Rôle {role.name} ou membre {member.display_name} introuvable")
+        except Exception as e:
+            print(f"❌ Erreur lors de l'attribution du rôle {role.name}: {e}")
+
+    async def safe_remove_role(self, member: discord.Member, role: discord.Role, reason: str = None):
+        """Retire un rôle de manière sécurisée avec rate limiting"""
+        try:
+            return await self.rate_limiter.execute_request(
+                member.remove_roles(role, reason=reason),
+                route=f'PATCH /guilds/{member.guild.id}/members/{member.id}',
+                major_params={'guild_id': member.guild.id}
+            )
+        except discord.Forbidden:
+            print(f"❌ Pas la permission de retirer le rôle {role.name}")
+        except discord.NotFound:
+            print(f"❌ Rôle {role.name} ou membre {member.display_name} introuvable")
+        except Exception as e:
+            print(f"❌ Erreur lors du retrait du rôle {role.name}: {e}")
+
+    async def safe_send_message(self, channel: discord.TextChannel, content: str = None, embed: discord.Embed = None):
+        """Envoie un message de manière sécurisée avec rate limiting"""
+        try:
+            return await self.rate_limiter.safe_send(channel, content, embed=embed)
+        except discord.Forbidden:
+            print(f"❌ Pas la permission d'envoyer un message dans {channel.name}")
+        except discord.NotFound:
+            print(f"❌ Channel {channel.name} introuvable")
+        except Exception as e:
+            print(f"❌ Erreur lors de l'envoi du message: {e}")
+
+    async def safe_respond(self, interaction: discord.Interaction, content: str = None, embed: discord.Embed = None, ephemeral: bool = False):
+        """Répond à une interaction de manière sécurisée avec rate limiting"""
+        try:
+            return await self.rate_limiter.execute_request(
+                interaction.response.send_message(content, embed=embed, ephemeral=ephemeral),
+                route='POST /interactions/{interaction_id}/{interaction_token}/callback',
+                major_params={'interaction_id': interaction.id}
+            )
+        except discord.InteractionResponded:
+            # Si déjà répondu, utiliser followup
+            try:
+                return await self.rate_limiter.execute_request(
+                    interaction.followup.send(content, embed=embed, ephemeral=ephemeral),
+                    route='POST /webhooks/{application_id}/{interaction_token}',
+                    major_params={'application_id': interaction.application_id}
+                )
+            except Exception as e:
+                print(f"❌ Erreur lors du followup: {e}")
+        except Exception as e:
+            print(f"❌ Erreur lors de la réponse à l'interaction: {e}")
+
+    async def safe_followup(self, interaction: discord.Interaction, content: str = None, embed: discord.Embed = None, ephemeral: bool = False):
+        """Envoie un followup de manière sécurisée avec rate limiting"""
+        try:
+            return await self.rate_limiter.execute_request(
+                interaction.followup.send(content, embed=embed, ephemeral=ephemeral),
+                route='POST /webhooks/{application_id}/{interaction_token}',
+                major_params={'application_id': interaction.application_id}
+            )
+        except Exception as e:
+            print(f"❌ Erreur lors du followup: {e}")
 
     async def sync_user_rewards(self, user_id: int):
         """Synchronise les récompenses avec le niveau actuel de l'utilisateur"""
@@ -251,25 +328,19 @@ class LevelingSystem(commands.Cog):
                 role_id = self.config['level_rewards'][level]
                 role = guild.get_role(role_id)
                 if role and role not in member.roles:
-                    try:
-                        await member.add_roles(role, reason=f"Récompense niveau {level} (sync)")
-                        
-                        # Enregistrer dans la DB
-                        async with aiosqlite.connect(self.db_path) as db:
-                            await db.execute(
-                                "INSERT INTO user_rewards (user_id, level_reached, role_id) VALUES (?, ?, ?)",
-                                (user_id, level, role_id)
-                            )
-                            await db.commit()
-                        
-                        # Annoncer la récompense
-                        await self.announce_reward(member, level)
-                        print(f"✅ Récompense niveau {level} synchronisée pour {member.display_name}")
-                        
-                    except discord.Forbidden:
-                        print(f"❌ Pas la permission d'attribuer le rôle niveau {level}")
-                    except Exception as e:
-                        print(f"❌ Erreur lors de l'attribution du rôle niveau {level}: {e}")
+                    await self.safe_add_role(member, role, f"Récompense niveau {level} (sync)")
+                    
+                    # Enregistrer dans la DB
+                    async with aiosqlite.connect(self.db_path) as db:
+                        await db.execute(
+                            "INSERT INTO user_rewards (user_id, level_reached, role_id) VALUES (?, ?, ?)",
+                            (user_id, level, role_id)
+                        )
+                        await db.commit()
+                    
+                    # Annoncer la récompense
+                    await self.announce_reward(member, level)
+                    print(f"✅ Récompense niveau {level} synchronisée pour {member.display_name}")
             
             # Retirer les récompenses qui ne devraient plus être possédées
             excess_rewards = current_reward_levels - should_have_levels
@@ -284,13 +355,8 @@ class LevelingSystem(commands.Cog):
                 if role_id:
                     role = guild.get_role(role_id)
                     if role and role in member.roles:
-                        try:
-                            await member.remove_roles(role, reason=f"Niveau {level} plus atteint (sync)")
-                            print(f"✅ Rôle niveau {level} retiré de {member.display_name}")
-                        except discord.Forbidden:
-                            print(f"❌ Pas la permission de retirer le rôle niveau {level}")
-                        except Exception as e:
-                            print(f"❌ Erreur lors du retrait du rôle niveau {level}: {e}")
+                        await self.safe_remove_role(member, role, f"Niveau {level} plus atteint (sync)")
+                        print(f"✅ Rôle niveau {level} retiré de {member.display_name}")
                     
                     # Supprimer de la DB
                     async with aiosqlite.connect(self.db_path) as db:
@@ -308,11 +374,8 @@ class LevelingSystem(commands.Cog):
                     if level != highest_level_reward[0]:
                         role = guild.get_role(role_id)
                         if role and role in member.roles:
-                            try:
-                                await member.remove_roles(role, reason="Récompense précédente remplacée")
-                                print(f"✅ Récompense précédente niveau {level} retirée de {member.display_name}")
-                            except Exception as e:
-                                print(f"❌ Erreur lors du retrait de la récompense précédente: {e}")
+                            await self.safe_remove_role(member, role, "Récompense précédente remplacée")
+                            print(f"✅ Récompense précédente niveau {level} retirée de {member.display_name}")
                                 
         except Exception as e:
             print(f"Erreur sync_user_rewards: {e}")
@@ -325,12 +388,12 @@ class LevelingSystem(commands.Cog):
             if channel:
                 if level in self.config['reward_messages']:
                     message = self.config['reward_messages'][level].format(user=member.mention)
-                    await channel.send(message)
+                    await self.safe_send_message(channel, message)
                 else:
                     role_id = self.config['level_rewards'].get(level)
                     role = member.guild.get_role(role_id) if role_id else None
                     role_mention = role.mention if role else f"<@&{role_id}>"
-                    await channel.send(f"🎉 {member.mention} a atteint le niveau {level} et obtient le rôle {role_mention} !")
+                    await self.safe_send_message(channel, f"🎉 {member.mention} a atteint le niveau {level} et obtient le rôle {role_mention} !")
 
     async def check_level_rewards(self, user_id: int, old_level: int, new_level: int):
         """Vérifie et attribue les récompenses de niveau"""
@@ -358,38 +421,30 @@ class LevelingSystem(commands.Cog):
                     if role in member.roles:
                         continue
                     
-                    # Attribuer le rôle
-                    try:
-                        await member.add_roles(role, reason=f"Niveau {level} atteint")
-                        
-                        # Enregistrer la récompense
-                        if self.db_ready:
-                            async with aiosqlite.connect(self.db_path) as db:
-                                await db.execute(
-                                    "INSERT INTO user_rewards (user_id, level_reached, role_id) VALUES (?, ?, ?)",
-                                    (user_id, level, role_id)
-                                )
-                                await db.commit()
-                        
-                        # Gérer la suppression des récompenses précédentes si configuré
-                        if self.config['remove_previous_rewards']:
-                            for prev_level, prev_role_id in self.config['level_rewards'].items():
-                                if prev_level < level and prev_level % 10 == 0:
-                                    prev_role = guild.get_role(prev_role_id)
-                                    if prev_role and prev_role in member.roles:
-                                        try:
-                                            await member.remove_roles(prev_role, reason="Récompense précédente remplacée")
-                                        except Exception as e:
-                                            print(f"❌ Erreur lors du retrait de la récompense précédente: {e}")
-                        
-                        # Annoncer la récompense
-                        await self.announce_reward(member, level)
-                        print(f"✅ Rôle {role.name} attribué à {member.display_name} pour le niveau {level}")
+                    # Attribuer le rôle avec rate limiting
+                    await self.safe_add_role(member, role, f"Niveau {level} atteint")
+                    
+                    # Enregistrer la récompense
+                    if self.db_ready:
+                        async with aiosqlite.connect(self.db_path) as db:
+                            await db.execute(
+                                "INSERT INTO user_rewards (user_id, level_reached, role_id) VALUES (?, ?, ?)",
+                                (user_id, level, role_id)
+                            )
+                            await db.commit()
+                    
+                    # Gérer la suppression des récompenses précédentes si configuré
+                    if self.config['remove_previous_rewards']:
+                        for prev_level, prev_role_id in self.config['level_rewards'].items():
+                            if prev_level < level and prev_level % 10 == 0:
+                                prev_role = guild.get_role(prev_role_id)
+                                if prev_role and prev_role in member.roles:
+                                    await self.safe_remove_role(prev_role, "Récompense précédente remplacée")
+                    
+                    # Annoncer la récompense
+                    await self.announce_reward(member, level)
+                    print(f"✅ Rôle {role.name} attribué à {member.display_name} pour le niveau {level}")
                             
-                    except discord.Forbidden:
-                        print(f"❌ Pas la permission d'attribuer le rôle {role.name}")
-                    except Exception as e:
-                        print(f"❌ Erreur lors de l'attribution du rôle: {e}")
         except Exception as e:
             print(f"Erreur check_level_rewards: {e}")
 
@@ -415,7 +470,7 @@ class LevelingSystem(commands.Cog):
     async def display_level_info(self, interaction: discord.Interaction, utilisateur: Optional[discord.Member] = None):
         """Fonction partagée pour afficher les informations de niveau"""
         if not self.db_ready:
-            await interaction.response.send_message("❌ Base de données non disponible. Le système de niveaux est temporairement indisponible.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Base de données non disponible. Le système de niveaux est temporairement indisponible.", ephemeral=True)
             return
         
         target = utilisateur or interaction.user
@@ -456,12 +511,12 @@ class LevelingSystem(commands.Cog):
             embed.add_field(name="🎁 Prochaine Récompense", value=f"Niveau {next_reward_level}: {role_mention}", inline=False)
         
         embed.set_footer(text=f"Serveur: {interaction.guild.name}")
-        await interaction.response.send_message(embed=embed)
+        await self.safe_respond(interaction, embed=embed)
 
     async def display_leaderboard(self, interaction: discord.Interaction, page: Optional[int] = 1):
         """Fonction partagée pour afficher le classement"""
         if not self.db_ready:
-            await interaction.response.send_message("❌ Base de données non disponible. Le système de niveaux est temporairement indisponible.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Base de données non disponible. Le système de niveaux est temporairement indisponible.", ephemeral=True)
             return
         
         page = max(1, page)
@@ -480,7 +535,7 @@ class LevelingSystem(commands.Cog):
                 cursor = await db.execute("SELECT COUNT(*) FROM user_levels")
                 total_users = (await cursor.fetchone())[0]
         except Exception as e:
-            await interaction.response.send_message("❌ Erreur lors de la récupération des données.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Erreur lors de la récupération des données.", ephemeral=True)
             return
         
         if not results:
@@ -489,7 +544,7 @@ class LevelingSystem(commands.Cog):
                 description="Aucun utilisateur trouvé pour cette page.",
                 color=discord.Color.red()
             )
-            await interaction.response.send_message(embed=embed)
+            await self.safe_respond(interaction, embed=embed)
             return
         
         # Créer l'embed
@@ -521,7 +576,7 @@ class LevelingSystem(commands.Cog):
         max_pages = math.ceil(total_users / 10) if total_users > 0 else 1
         embed.set_footer(text=f"Page {page}/{max_pages} • {total_users} utilisateurs au total")
         
-        await interaction.response.send_message(embed=embed)
+        await self.safe_respond(interaction, embed=embed)
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -646,15 +701,15 @@ class LevelingSystem(commands.Cog):
     async def add_exp(self, interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
         """Ajoute de l'EXP à un utilisateur (commande admin)"""
         if not self.is_admin(interaction.user):
-            await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         if not self.db_ready:
-            await interaction.response.send_message("❌ Base de données non disponible.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Base de données non disponible.", ephemeral=True)
             return
         
         if montant <= 0:
-            await interaction.response.send_message("❌ Le montant doit être positif.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Le montant doit être positif.", ephemeral=True)
             return
         
         old_level, new_level, _ = await self.update_user_exp(utilisateur.id, montant)
@@ -668,33 +723,33 @@ class LevelingSystem(commands.Cog):
         if new_level > old_level:
             embed.add_field(name="📈 Niveau", value=f"{old_level} → {new_level}", inline=False)
         
-        await interaction.response.send_message(embed=embed)
+        await self.safe_respond(interaction, embed=embed)
 
     @app_commands.command(name="exp-remove", description="Retire de l'EXP à un utilisateur (Admin)")
     @app_commands.describe(utilisateur="L'utilisateur à qui retirer de l'EXP", montant="Montant d'EXP à retirer")
     async def remove_exp(self, interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
         """Retire de l'EXP à un utilisateur (commande admin)"""
         if not self.is_admin(interaction.user):
-            await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         if not self.db_ready:
-            await interaction.response.send_message("❌ Base de données non disponible.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Base de données non disponible.", ephemeral=True)
             return
         
         if montant <= 0:
-            await interaction.response.send_message("❌ Le montant doit être positif.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Le montant doit être positif.", ephemeral=True)
             return
         
         user_data = await self.get_user_data(utilisateur.id)
         if user_data['exp'] < montant:
-            await interaction.response.send_message("❌ L'utilisateur n'a pas assez d'EXP.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ L'utilisateur n'a pas assez d'EXP.", ephemeral=True)
             return
         
         old_level, new_level, _ = await self.update_user_exp(utilisateur.id, -montant)
         
         # Synchroniser les récompenses après modification manuelle
-        await self.sync_user_rewards(utilisateur.id)
+        asyncio.create_task(self.sync_user_rewards(utilisateur.id))
         
         embed = discord.Embed(
             title="✅ EXP Retirée",
@@ -705,22 +760,22 @@ class LevelingSystem(commands.Cog):
         if new_level < old_level:
             embed.add_field(name="📉 Niveau", value=f"{old_level} → {new_level}", inline=False)
         
-        await interaction.response.send_message(embed=embed)
+        await self.safe_respond(interaction, embed=embed)
 
     @app_commands.command(name="exp-set", description="Définit l'EXP d'un utilisateur (Admin)")
     @app_commands.describe(utilisateur="L'utilisateur dont modifier l'EXP", montant="Nouveau montant d'EXP")
     async def set_exp(self, interaction: discord.Interaction, utilisateur: discord.Member, montant: int):
         """Définit l'EXP d'un utilisateur (commande admin)"""
         if not self.is_admin(interaction.user):
-            await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         if not self.db_ready:
-            await interaction.response.send_message("❌ Base de données non disponible.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Base de données non disponible.", ephemeral=True)
             return
         
         if montant < 0:
-            await interaction.response.send_message("❌ Le montant ne peut pas être négatif.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Le montant ne peut pas être négatif.", ephemeral=True)
             return
         
         try:
@@ -737,7 +792,7 @@ class LevelingSystem(commands.Cog):
                 await db.commit()
             
             # Synchroniser toutes les récompenses
-            await self.sync_user_rewards(utilisateur.id)
+            asyncio.create_task(self.sync_user_rewards(utilisateur.id))
             
             embed = discord.Embed(
                 title="✅ EXP Définie",
@@ -746,9 +801,9 @@ class LevelingSystem(commands.Cog):
             )
             embed.add_field(name="📊 Niveau", value=f"{old_level} → {new_level}", inline=False)
             
-            await interaction.response.send_message(embed=embed)
+            await self.safe_respond(interaction, embed=embed)
         except Exception as e:
-            await interaction.response.send_message("❌ Erreur lors de la mise à jour.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Erreur lors de la mise à jour.", ephemeral=True)
 
     @app_commands.command(name="set-activity", description="Définit l'activité d'un utilisateur et calcule l'EXP (Admin)")
     @app_commands.describe(
@@ -759,15 +814,15 @@ class LevelingSystem(commands.Cog):
     async def set_activity(self, interaction: discord.Interaction, utilisateur: discord.Member, messages: int, temps_vocal: int):
         """Définit l'activité d'un utilisateur et recalcule l'EXP"""
         if not self.is_admin(interaction.user):
-            await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         if not self.db_ready:
-            await interaction.response.send_message("❌ Base de données non disponible.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Base de données non disponible.", ephemeral=True)
             return
         
         if messages < 0 or temps_vocal < 0:
-            await interaction.response.send_message("❌ Les valeurs ne peuvent pas être négatives.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Les valeurs ne peuvent pas être négatives.", ephemeral=True)
             return
         
         try:
@@ -789,7 +844,7 @@ class LevelingSystem(commands.Cog):
                 await db.commit()
             
             # Synchroniser les récompenses
-            await self.sync_user_rewards(utilisateur.id)
+            asyncio.create_task(self.sync_user_rewards(utilisateur.id))
             
             embed = discord.Embed(
                 title="✅ Activité Définie",
@@ -801,23 +856,27 @@ class LevelingSystem(commands.Cog):
             embed.add_field(name="⭐ EXP Calculée", value=f"`{total_exp:,}`", inline=True)
             embed.add_field(name="📊 Niveau", value=f"{old_level} → {new_level}", inline=False)
             
-            await interaction.response.send_message(embed=embed)
+            await self.safe_respond(interaction, embed=embed)
         except Exception as e:
-            await interaction.response.send_message("❌ Erreur lors de la mise à jour.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Erreur lors de la mise à jour.", ephemeral=True)
 
     @app_commands.command(name="sync-rewards", description="Synchronise les récompenses d'un utilisateur (Admin)")
     @app_commands.describe(utilisateur="L'utilisateur dont synchroniser les récompenses")
     async def sync_rewards_command(self, interaction: discord.Interaction, utilisateur: discord.Member):
         """Synchronise les récompenses d'un utilisateur avec son niveau actuel"""
         if not self.is_admin(interaction.user):
-            await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         if not self.db_ready:
-            await interaction.response.send_message("❌ Base de données non disponible.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Base de données non disponible.", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        await self.rate_limiter.execute_request(
+            interaction.response.defer(),
+            route='POST /interactions/{interaction_id}/{interaction_token}/callback',
+            major_params={'interaction_id': interaction.id}
+        )
         
         try:
             await self.sync_user_rewards(utilisateur.id)
@@ -828,15 +887,15 @@ class LevelingSystem(commands.Cog):
                 color=discord.Color.green()
             )
             
-            await interaction.followup.send(embed=embed)
+            await self.safe_followup(interaction, embed=embed)
         except Exception as e:
-            await interaction.followup.send("❌ Erreur lors de la synchronisation.", ephemeral=True)
+            await self.safe_followup(interaction, "❌ Erreur lors de la synchronisation.", ephemeral=True)
 
     @app_commands.command(name="toggle-remove-previous", description="Active/désactive la suppression des récompenses précédentes (Admin)")
     async def toggle_remove_previous(self, interaction: discord.Interaction):
         """Toggle la suppression des récompenses précédentes"""
         if not self.is_admin(interaction.user):
-            await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         self.config['remove_previous_rewards'] = not self.config['remove_previous_rewards']
@@ -848,13 +907,13 @@ class LevelingSystem(commands.Cog):
             color=discord.Color.blue()
         )
         
-        await interaction.response.send_message(embed=embed)
+        await self.safe_respond(interaction, embed=embed)
 
     @app_commands.command(name="level-debug", description="Informations de debug pour le système de niveau (Admin)")
     async def level_debug(self, interaction: discord.Interaction):
         """Commande de debug pour vérifier l'état du système"""
         if not self.is_admin(interaction.user):
-            await interaction.response.send_message("❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+            await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
         embed = discord.Embed(
@@ -888,7 +947,11 @@ class LevelingSystem(commands.Cog):
         voice_task_status = "✅ Active" if hasattr(self, 'voice_exp_task') and not self.voice_exp_task.is_being_cancelled() else "❌ Inactive"
         embed.add_field(name="Tâche Vocal", value=voice_task_status, inline=True)
         
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Rate limiter stats
+        metrics = self.rate_limiter.get_metrics()
+        embed.add_field(name="Rate Limiter", value=f"Req: {metrics['total_requests']}\nRL: {metrics['rate_limited_requests']}", inline=True)
+        
+        await self.safe_respond(interaction, embed=embed, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(LevelingSystem(bot))

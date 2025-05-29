@@ -29,6 +29,9 @@ class BumpReminder(commands.Cog):
         self.reminder_active = False
         self.france_tz = pytz.timezone('Europe/Paris')
         
+        # Cache pour les utilisateurs qui ont utilisé /bump récemment
+        self.recent_bump_users = {}  # {timestamp: user}
+        
         # Utilisation du rate limiter avancé
         self.rate_limiter = get_rate_limiter()
         
@@ -92,6 +95,14 @@ class BumpReminder(commands.Cog):
                 json.dump(data, f)
         except Exception as e:
             logging.error(f"Erreur sauvegarde: {e}")
+            
+    def clean_old_bump_users(self):
+        """Nettoie le cache des utilisateurs de bump (garde seulement les 10 dernières minutes)"""
+        cutoff_time = datetime.utcnow() - timedelta(minutes=10)
+        self.recent_bump_users = {
+            timestamp: user for timestamp, user in self.recent_bump_users.items()
+            if timestamp > cutoff_time
+        }
             
     async def get_guild_safe(self) -> Optional[discord.Guild]:
         """Récupère le serveur avec cache et gestion d'erreurs"""
@@ -382,56 +393,27 @@ class BumpReminder(commands.Cog):
             logging.error(f"Erreur envoi rappel personnel: {e}")
             return False
         
-    async def find_bump_user(self, disboard_message):
-        """Trouve l'utilisateur qui a effectué le bump dans le canal incantations"""
-        try:
-            # Cherche uniquement dans le canal incantations
-            incantations_channel = await self.get_channel_safe(self.incantations_channel_id)
-            if not incantations_channel:
-                logging.error("Canal incantations non trouvé")
-                return None
-                
-            cutoff_time = disboard_message.created_at - timedelta(minutes=5)
-            found_users = []
+    def find_most_recent_bump_user(self, disboard_message_time):
+        """Trouve l'utilisateur qui a fait le bump le plus récemment avant le message Disboard"""
+        self.clean_old_bump_users()
+        
+        # Recherche l'utilisateur le plus récent avant le message Disboard
+        recent_user = None
+        best_time_diff = None
+        
+        for timestamp, user in self.recent_bump_users.items():
+            time_diff = disboard_message_time - timestamp
             
-            # Recherche étendue dans le canal incantations
-            async for msg in incantations_channel.history(limit=50, before=disboard_message, after=cutoff_time):
-                # Vérifie les interactions slash commands avec bump
-                if hasattr(msg, 'interaction') and msg.interaction:
-                    interaction_data = getattr(msg.interaction, 'data', {})
-                    if isinstance(interaction_data, dict):
-                        if interaction_data.get('name') == 'bump':
-                            logging.info(f"Utilisateur bump trouvé via interaction.data: {msg.interaction.user}")
-                            return msg.interaction.user
-                    
-                    if hasattr(msg.interaction, 'name') and msg.interaction.name == "bump":
-                        logging.info(f"Utilisateur bump trouvé via interaction.name: {msg.interaction.user}")
-                        return msg.interaction.user
-                
-                # Vérifie les messages contenant /bump ou la mention du command
-                content_lower = msg.content.strip().lower()
-                if (content_lower in ["/bump", "!d bump", "bump"] or 
-                    f"</{self.bump_command_id}>" in msg.content or
-                    f"</bump:{self.bump_command_id}>" in msg.content):
-                    
-                    logging.info(f"Utilisateur bump trouvé via message: {msg.author}")
-                    found_users.append((msg.author, msg.created_at))
-                    
-                # Vérifie si le message a été créé par une interaction bump
-                if (hasattr(msg, 'application_id') and msg.application_id == self.disboard_id and
-                    not msg.author.bot):
-                    logging.info(f"Utilisateur bump trouvé via application_id: {msg.author}")
-                    found_users.append((msg.author, msg.created_at))
-            
-            # Retourne l'utilisateur le plus récent si plusieurs trouvés
-            if found_users:
-                found_users.sort(key=lambda x: x[1], reverse=True)
-                return found_users[0][0]
-                    
-        except Exception as e:
-            logging.error(f"Erreur recherche utilisateur bump: {e}")
-            
-        return None
+            # Doit être avant le message Disboard et dans les 5 dernières minutes
+            if timedelta(0) <= time_diff <= timedelta(minutes=5):
+                if best_time_diff is None or time_diff < best_time_diff:
+                    best_time_diff = time_diff
+                    recent_user = user
+        
+        if recent_user:
+            logging.info(f"✅ Utilisateur bump trouvé via cache: {recent_user} (il y a {best_time_diff})")
+        
+        return recent_user
         
     async def handle_successful_bump(self, bump_user):
         """Gère un bump réussi"""
@@ -511,6 +493,32 @@ class BumpReminder(commands.Cog):
         """Se déclenche quand le bot est prêt"""
         if not self.initialized:
             await self.initialize_system()
+            
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction):
+        """Capture les interactions slash commands pour détecter /bump"""
+        try:
+            # Vérifie si c'est une commande slash bump dans le bon serveur et canal
+            if (interaction.type == discord.InteractionType.application_command and
+                interaction.guild and interaction.guild.id == self.guild_id and
+                interaction.channel_id == self.incantations_channel_id):
+                
+                # Vérifie si c'est la commande bump de Disboard
+                if (hasattr(interaction, 'data') and interaction.data and
+                    interaction.data.get('name') == 'bump' and
+                    getattr(interaction, 'application_id', None) == self.disboard_id):
+                    
+                    # Stocke l'utilisateur avec timestamp
+                    timestamp = datetime.utcnow()
+                    self.recent_bump_users[timestamp] = interaction.user
+                    
+                    # Nettoie le cache
+                    self.clean_old_bump_users()
+                    
+                    logging.info(f"✅ Commande /bump détectée de {interaction.user} à {timestamp}")
+                    
+        except Exception as e:
+            logging.error(f"Erreur capture interaction bump: {e}")
         
     async def cog_load(self):
         """Chargement du module"""
@@ -633,8 +641,8 @@ class BumpReminder(commands.Cog):
                 
                 logging.info(f"Bump détecté dans {message.channel.name}")
                 
-                # Trouve l'utilisateur qui a bumpé dans le canal incantations
-                bump_user = await self.find_bump_user(message)
+                # Trouve l'utilisateur qui a bumpé via le cache des interactions
+                bump_user = self.find_most_recent_bump_user(message.created_at)
                 
                 if bump_user:
                     logging.info(f"✅ Utilisateur qui a bumpé trouvé: {bump_user}")
@@ -674,6 +682,11 @@ class BumpReminder(commands.Cog):
         # Récupère les métriques du rate limiter
         metrics = self.rate_limiter.get_metrics()
         
+        # Nettoie et affiche le cache des utilisateurs de bump
+        self.clean_old_bump_users()
+        recent_users_str = ", ".join([f"{user.display_name} ({timestamp.strftime('%H:%M:%S')})" 
+                                     for timestamp, user in sorted(self.recent_bump_users.items(), reverse=True)])
+        
         debug_info = f"""**🔧 Debug Bump System**
 
 **État:**
@@ -682,6 +695,10 @@ class BumpReminder(commands.Cog):
 • Message de rappel général: `{bool(self.bump_message)}`
 • Message de rappel personnel: `{bool(self.personal_reminder_message)}`
 • Membres actifs en cache: `{len(self._recent_active_members)}`
+
+**Cache Bump Users:**
+• Utilisateurs récents: `{len(self.recent_bump_users)}`
+• Détails: `{recent_users_str or 'Aucun'}`
 
 **Rate Limiter:**
 • Requêtes totales: `{metrics['total_requests']}`
@@ -755,6 +772,7 @@ class BumpReminder(commands.Cog):
         self.last_general_reminder_time = None
         self.last_personal_reminder_time = None
         self.reminder_active = False
+        self.recent_bump_users.clear()
         self.save_data()
         if self.bump_message:
             await self.rate_limiter.safe_delete(self.bump_message)
