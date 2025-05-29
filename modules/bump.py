@@ -11,44 +11,10 @@ import random
 from typing import Optional, Dict, Set
 import time
 
-load_dotenv(dotenv_path='../.env')
+# Import du rate limiter
+from .rate_limiter import get_rate_limiter, DiscordRateLimiter
 
-class RateLimitManager:
-    """Gestionnaire de rate limits pour éviter les bannissements Cloudflare"""
-    
-    def __init__(self):
-        self.request_timestamps = []
-        self.invalid_requests = 0
-        self.invalid_reset_time = time.time()
-        
-    def can_make_request(self) -> bool:
-        """Vérifie si on peut faire une requête sans dépasser les limites"""
-        now = time.time()
-        
-        # Nettoie les timestamps anciens (>1 seconde)
-        self.request_timestamps = [ts for ts in self.request_timestamps if now - ts < 1.0]
-        
-        # Reset compteur requêtes invalides si 10 minutes écoulées
-        if now - self.invalid_reset_time > 600:
-            self.invalid_requests = 0
-            self.invalid_reset_time = now
-        
-        # Vérifie les limites
-        if len(self.request_timestamps) >= 45:  # Marge de sécurité sous 50/sec
-            return False
-        if self.invalid_requests >= 9500:  # Marge de sécurité sous 10000/10min
-            return False
-            
-        return True
-    
-    def record_request(self):
-        """Enregistre une requête"""
-        self.request_timestamps.append(time.time())
-    
-    def record_invalid_request(self):
-        """Enregistre une requête invalide"""
-        self.invalid_requests += 1
-        logging.warning(f"Requête invalide #{self.invalid_requests}/10000")
+load_dotenv(dotenv_path='../.env')
 
 class BumpReminder(commands.Cog):
     def __init__(self, bot):
@@ -62,7 +28,9 @@ class BumpReminder(commands.Cog):
         self.initialized = False
         self.reminder_active = False
         self.france_tz = pytz.timezone('Europe/Paris')
-        self.rate_limiter = RateLimitManager()
+        
+        # Utilisation du rate limiter avancé
+        self.rate_limiter = get_rate_limiter()
         
         # Cache pour optimiser les performances
         self._cached_guild = None
@@ -168,52 +136,6 @@ class BumpReminder(commands.Cog):
             
         return None
     
-    async def safe_api_call(self, coro, error_context="API call"):
-        """Exécute un appel API avec gestion des rate limits et erreurs"""
-        if not self.rate_limiter.can_make_request():
-            await asyncio.sleep(1.1)  # Attendre pour éviter rate limit
-            
-        try:
-            self.rate_limiter.record_request()
-            return await coro
-        except discord.HTTPException as e:
-            if e.status in [401, 403, 429]:
-                self.rate_limiter.record_invalid_request()
-                if e.status == 429:  # Rate limit spécifique
-                    retry_after = getattr(e, 'retry_after', 5.0)
-                    logging.warning(f"Rate limit atteint, attente {retry_after}s")
-                    await asyncio.sleep(retry_after)
-                elif e.status == 403:
-                    logging.warning(f"Permissions insuffisantes pour {error_context}")
-                return None
-            raise
-        except Exception as e:
-            logging.error(f"Erreur {error_context}: {e}")
-            return None
-    
-    async def safe_history_iteration(self, channel, limit=20, **kwargs):
-        """Itère l'historique d'un canal avec gestion des rate limits"""
-        if not self.rate_limiter.can_make_request():
-            await asyncio.sleep(1.1)
-            
-        try:
-            self.rate_limiter.record_request()
-            async for message in channel.history(limit=limit, **kwargs):
-                yield message
-                # Petite pause entre les messages pour éviter le spam
-                await asyncio.sleep(0.1)
-        except discord.HTTPException as e:
-            if e.status in [401, 403, 429]:
-                self.rate_limiter.record_invalid_request()
-                if e.status == 429:
-                    retry_after = getattr(e, 'retry_after', 5.0)
-                    logging.warning(f"Rate limit historique, attente {retry_after}s")
-                    await asyncio.sleep(retry_after)
-            return
-        except Exception as e:
-            logging.error(f"Erreur itération historique: {e}")
-            return
-    
     def time_since_last_bump(self):
         """Retourne le temps écoulé depuis le dernier bump"""
         if not self.last_bump_time:
@@ -289,8 +211,8 @@ class BumpReminder(commands.Cog):
             
             messages_to_delete = []
             
-            # Recherche les messages du bot contenant des mots-clés de bump (limite à 50 pour éviter trop de requêtes)
-            async for message in self.safe_history_iteration(discussion_channel, limit=50):
+            # Recherche les messages du bot contenant des mots-clés de bump (limite à 50)
+            async for message in discussion_channel.history(limit=50):
                 # Vérifie si c'est un message du bot
                 if message.author == guild.me:
                     message_content = message.content.lower()
@@ -299,16 +221,15 @@ class BumpReminder(commands.Cog):
                     if any(keyword.lower() in message_content for keyword in bump_keywords):
                         messages_to_delete.append(message)
                         
-                    # Limite à ne pas dépasser pour éviter trop de suppressions
+                    # Limite pour éviter trop de suppressions
                     if len(messages_to_delete) >= 20:
                         break
             
-            # Supprime les messages trouvés
+            # Supprime les messages trouvés avec rate limiting
             deleted_count = 0
             for message in messages_to_delete:
                 try:
-                    delete_coro = message.delete()
-                    await self.safe_api_call(delete_coro, f"nettoyage message bump")
+                    await self.rate_limiter.safe_delete(message)
                     deleted_count += 1
                     await asyncio.sleep(0.5)  # Pause pour éviter rate limit
                 except Exception as e:
@@ -332,7 +253,7 @@ class BumpReminder(commands.Cog):
             logging.info("Recherche du dernier bump dans l'historique...")
             
             # Limite stricte pour éviter trop de requêtes
-            async for message in self.safe_history_iteration(incantations_channel, limit=20):
+            async for message in incantations_channel.history(limit=20):
                 if (message.author.id == self.disboard_id and 
                     message.embeds and 
                     any("bump effectué" in str(embed.description).lower() for embed in message.embeds if embed.description)):
@@ -366,7 +287,7 @@ class BumpReminder(commands.Cog):
                             f"💜 **Pourquoi bumper ?** Cela permet à de nouvelles personnes de découvrir notre communauté !\n\n" \
                             f"*Merci de soutenir Les Élémentalistes ! ✨*"
             
-            await self.safe_api_call(incantations_channel.send(message_content), "envoi message bump")
+            await self.rate_limiter.safe_send(incantations_channel, message_content)
             logging.info("Message de commande bump envoyé")
                 
         except Exception as e:
@@ -405,7 +326,7 @@ class BumpReminder(commands.Cog):
                     
                 try:
                     # Limite stricte des messages vérifiés
-                    async for message in self.safe_history_iteration(channel, limit=15, after=cutoff_time):
+                    async for message in channel.history(limit=15, after=cutoff_time):
                         if not message.author.bot and message.author != guild.me:
                             new_active_members.add(message.author)
                                 
@@ -444,10 +365,7 @@ class BumpReminder(commands.Cog):
                             f"Rendez-vous dans {incantations_mention} pour utiliser la commande bump !\n\n" \
                             f"*Si quelqu'un d'autre bump, ça me va aussi :)*"
             
-            sent_message = await self.safe_api_call(
-                reminder_channel.send(message_content), 
-                "envoi rappel personnel"
-            )
+            sent_message = await self.rate_limiter.safe_send(reminder_channel, message_content)
             
             if sent_message:
                 # Stocke le message personnel pour pouvoir le transformer plus tard
@@ -477,7 +395,7 @@ class BumpReminder(commands.Cog):
             found_users = []
             
             # Recherche étendue dans le canal incantations
-            async for msg in self.safe_history_iteration(incantations_channel, limit=50, before=disboard_message, after=cutoff_time):
+            async for msg in incantations_channel.history(limit=50, before=disboard_message, after=cutoff_time):
                 # Vérifie les interactions slash commands avec bump
                 if hasattr(msg, 'interaction') and msg.interaction:
                     interaction_data = getattr(msg.interaction, 'data', {})
@@ -541,16 +459,14 @@ class BumpReminder(commands.Cog):
                 else:
                     message_content = f"<a:anyayay:1377087649403109498> Serveur bumpé avec succès ! Merci !"
                 
-                edit_coro = message_to_update.edit(content=message_content)
-                await self.safe_api_call(edit_coro, "mise à jour message bump")
+                await self.rate_limiter.safe_edit(message_to_update, content=message_content)
                 
                 france_time = self.convert_to_france_time(self.last_bump_time)
                 logging.info(f"Message de bump mis à jour pour {bump_user or 'utilisateur inconnu'} à {france_time}")
                 
                 # Supprime le message après 5 minutes
                 await asyncio.sleep(300)
-                delete_coro = message_to_update.delete()
-                await self.safe_api_call(delete_coro, "suppression message bump")
+                await self.rate_limiter.safe_delete(message_to_update)
             
             logging.info(f"✅ Bump traité pour {bump_user or 'utilisateur inconnu'}")
                 
@@ -607,7 +523,7 @@ class BumpReminder(commands.Cog):
         if self.personal_reminder_task.is_running():
             self.personal_reminder_task.cancel()
             
-    @tasks.loop(minutes=2)  # Réduit la fréquence pour éviter trop de vérifications
+    @tasks.loop(minutes=2)
     async def bump_monitor_task(self):
         """Surveille si un rappel doit être envoyé"""
         try:
@@ -635,8 +551,7 @@ class BumpReminder(commands.Cog):
                 if active_member:
                     # SEULEMENT SI un membre est trouvé, supprime l'ancien message général
                     if self.bump_message:
-                        delete_coro = self.bump_message.delete()
-                        await self.safe_api_call(delete_coro, "suppression ancien message")
+                        await self.rate_limiter.safe_delete(self.bump_message)
                         self.bump_message = None
                     
                     await self.send_personal_bump_reminder(active_member)
@@ -663,8 +578,7 @@ class BumpReminder(commands.Cog):
                 
             # Supprime l'ancien message s'il existe
             if self.bump_message:
-                delete_coro = self.bump_message.delete()
-                await self.safe_api_call(delete_coro, "suppression ancien rappel")
+                await self.rate_limiter.safe_delete(self.bump_message)
                     
             bump_role = guild.get_role(self.bump_role_id)
             role_mention = bump_role.mention if bump_role else f"<@&{self.bump_role_id}>"
@@ -674,8 +588,7 @@ class BumpReminder(commands.Cog):
             message_content = f"<:konatacry:1377089246766174308> Quelqu'un pourrait-il bump le serveur afin de nous soutenir ? {role_mention}\n" \
                             f"Rendez-vous dans {incantations_mention} pour utiliser la commande bump !"
             
-            send_coro = reminder_channel.send(message_content)
-            self.bump_message = await self.safe_api_call(send_coro, "envoi rappel bump")
+            self.bump_message = await self.rate_limiter.safe_send(reminder_channel, message_content)
             
             if self.bump_message:
                 self.reminder_active = True
@@ -715,8 +628,7 @@ class BumpReminder(commands.Cog):
             if "bump effectué" in description.lower():
                 # Si ce n'est pas dans INCANTATIONS, supprimer le message
                 if message.channel.id != self.incantations_channel_id:
-                    delete_coro = message.delete()
-                    await self.safe_api_call(delete_coro, f"suppression message bump {message.channel.name}")
+                    await self.rate_limiter.safe_delete(message)
                     return
                 
                 logging.info(f"Bump détecté dans {message.channel.name}")
@@ -738,12 +650,10 @@ class BumpReminder(commands.Cog):
                     
                     # Supprime les messages de rappel s'ils existent
                     if self.bump_message:
-                        delete_coro = self.bump_message.delete()
-                        await self.safe_api_call(delete_coro, "suppression message après bump")
+                        await self.rate_limiter.safe_delete(self.bump_message)
                         self.bump_message = None
                     if self.personal_reminder_message:
-                        delete_coro = self.personal_reminder_message.delete()
-                        await self.safe_api_call(delete_coro, "suppression message personnel après bump")
+                        await self.rate_limiter.safe_delete(self.personal_reminder_message)
                         self.personal_reminder_message = None
                     
         except Exception as e:
@@ -761,6 +671,9 @@ class BumpReminder(commands.Cog):
         last_general_france = self.convert_to_france_time(self.last_general_reminder_time) if self.last_general_reminder_time else None
         last_personal_france = self.convert_to_france_time(self.last_personal_reminder_time) if self.last_personal_reminder_time else None
         
+        # Récupère les métriques du rate limiter
+        metrics = self.rate_limiter.get_metrics()
+        
         debug_info = f"""**🔧 Debug Bump System**
 
 **État:**
@@ -769,8 +682,13 @@ class BumpReminder(commands.Cog):
 • Message de rappel général: `{bool(self.bump_message)}`
 • Message de rappel personnel: `{bool(self.personal_reminder_message)}`
 • Membres actifs en cache: `{len(self._recent_active_members)}`
-• Requêtes/sec: `{len(self.rate_limiter.request_timestamps)}/45`
-• Requêtes invalides: `{self.rate_limiter.invalid_requests}/9500`
+
+**Rate Limiter:**
+• Requêtes totales: `{metrics['total_requests']}`
+• Rate limited: `{metrics['rate_limited_requests']} ({metrics['rate_limit_percentage']}%)`
+• Req/min: `{metrics['requests_per_minute']}`
+• Buckets actifs: `{metrics['active_buckets']}`
+• Global rate limited: `{'✅' if metrics['global_rate_limited'] else '❌'}`
 
 **Timing:**
 • Dernier bump: `{last_bump_france or 'Jamais'}`
@@ -839,12 +757,10 @@ class BumpReminder(commands.Cog):
         self.reminder_active = False
         self.save_data()
         if self.bump_message:
-            delete_coro = self.bump_message.delete()
-            await self.safe_api_call(delete_coro, "reset bump timer")
+            await self.rate_limiter.safe_delete(self.bump_message)
             self.bump_message = None
         if self.personal_reminder_message:
-            delete_coro = self.personal_reminder_message.delete()
-            await self.safe_api_call(delete_coro, "reset bump timer")
+            await self.rate_limiter.safe_delete(self.personal_reminder_message)
             self.personal_reminder_message = None
         await ctx.send("✅ Timer de bump reseté !")
 

@@ -10,11 +10,15 @@ import random
 import asyncio
 from PIL import Image, ImageDraw
 from typing import Optional, Union
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from rate_limiter import get_rate_limiter
 
 class LoveCalc(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db_path = "lovecalc.db"
+        self.rate_limiter = get_rate_limiter()
         
     async def setup_database(self):
         """Initialize database table if not exists"""
@@ -50,9 +54,13 @@ class LoveCalc(commands.Cog):
             if result:
                 return result[0]
             
-            # Calculate new percentage based on user IDs
-            combined_id = abs(user1_id + user2_id)
-            love_percentage = combined_id % 101
+            # For self-love, generate random result
+            if user1_id == user2_id:
+                love_percentage = random.randint(0, 100)
+            else:
+                # Calculate new percentage based on user IDs
+                combined_id = abs(user1_id + user2_id)
+                love_percentage = combined_id % 101
             
             await db.execute("""
                 INSERT INTO love_results (user_pair_hash, user1_id, user2_id, love_percentage)
@@ -62,22 +70,38 @@ class LoveCalc(commands.Cog):
             
             return love_percentage
     
-    def get_love_comment(self, percentage: int) -> str:
+    def get_love_comment(self, percentage: int, is_self: bool = False) -> str:
         """Get comment based on love percentage"""
-        if percentage == 0:
-            return "💔 Aucune affinité... Il vaut mieux rester amis !"
-        elif 1 <= percentage <= 20:
-            return "😐 Il y a peut-être quelque chose, mais c'est très léger..."
-        elif 21 <= percentage <= 40:
-            return "😊 Une petite étincelle ! Qui sait ce que l'avenir réserve ?"
-        elif 41 <= percentage <= 60:
-            return "💕 Une belle complicité se dessine ! C'est prometteur !"
-        elif 61 <= percentage <= 80:
-            return "💖 Wow ! Il y a de la magie dans l'air ! L'amour est là !"
-        elif 81 <= percentage <= 99:
-            return "💝 C'est de l'amour fou ! Vous êtes faits l'un pour l'autre !"
-        else:  # 100
-            return "💍 AMOUR PARFAIT ! Les étoiles se sont alignées ! C'est le destin !"
+        if is_self:
+            if percentage == 0:
+                return "💔 Tu sembles avoir besoin de plus d'amour-propre !"
+            elif 1 <= percentage <= 20:
+                return "😐 Tu pourrais apprendre à t'aimer un peu plus..."
+            elif 21 <= percentage <= 40:
+                return "😊 Tu commences à t'apprécier, c'est bien !"
+            elif 41 <= percentage <= 60:
+                return "💕 Tu as une bonne estime de toi ! Continue comme ça !"
+            elif 61 <= percentage <= 80:
+                return "💖 Tu t'aimes beaucoup ! C'est formidable !"
+            elif 81 <= percentage <= 99:
+                return "💝 Tu es totalement en harmonie avec toi-même !"
+            else:  # 100
+                return "💍 AMOUR-PROPRE PARFAIT ! Tu es ton/ta meilleur(e) ami(e) !"
+        else:
+            if percentage == 0:
+                return "💔 Aucune affinité... Il vaut mieux rester amis !"
+            elif 1 <= percentage <= 20:
+                return "😐 Il y a peut-être quelque chose, mais c'est très léger..."
+            elif 21 <= percentage <= 40:
+                return "😊 Une petite étincelle ! Qui sait ce que l'avenir réserve ?"
+            elif 41 <= percentage <= 60:
+                return "💕 Une belle complicité se dessine ! C'est prometteur !"
+            elif 61 <= percentage <= 80:
+                return "💖 Wow ! Il y a de la magie dans l'air ! L'amour est là !"
+            elif 81 <= percentage <= 99:
+                return "💝 C'est de l'amour fou ! Vous êtes faits l'un pour l'autre !"
+            else:  # 100
+                return "💍 AMOUR PARFAIT ! Les étoiles se sont alignées ! C'est le destin !"
     
     async def download_avatar(self, user: discord.Member) -> Image.Image:
         """Download and return user avatar as PIL Image"""
@@ -173,7 +197,10 @@ class LoveCalc(commands.Cog):
         if args_list and args_list[0].lower() == "random":
             random_member = self.get_random_member(ctx, ctx.author)
             if not random_member:
-                await ctx.send("❌ Aucun membre disponible pour un calcul aléatoire !")
+                await self.rate_limiter.safe_send(
+                    ctx.channel,
+                    "❌ Aucun membre disponible pour un calcul aléatoire !"
+                )
                 return
             
             target_user = random_member
@@ -187,18 +214,27 @@ class LoveCalc(commands.Cog):
                 try:
                     personne = await commands.MemberConverter().convert(ctx, args_list[0])
                 except commands.BadArgument:
-                    await ctx.send("❌ Impossible de trouver ce membre !")
+                    await self.rate_limiter.safe_send(
+                        ctx.channel,
+                        "❌ Impossible de trouver ce membre !"
+                    )
                     return
             
             if len(args_list) >= 2:
                 try:
                     avec = await commands.MemberConverter().convert(ctx, args_list[1])
                 except commands.BadArgument:
-                    await ctx.send("❌ Impossible de trouver le deuxième membre !")
+                    await self.rate_limiter.safe_send(
+                        ctx.channel,
+                        "❌ Impossible de trouver le deuxième membre !"
+                    )
                     return
             
             if personne is None:
-                await ctx.send("❌ Tu dois mentionner au moins une personne ou utiliser `random` !")
+                await self.rate_limiter.safe_send(
+                    ctx.channel,
+                    "❌ Tu dois mentionner au moins une personne ou utiliser `random` !"
+                )
                 return
             
             if avec is None:
@@ -210,22 +246,23 @@ class LoveCalc(commands.Cog):
                 target_user = avec
                 author = personne
         
-        if author.id == target_user.id:
-            await ctx.send("😅 Tu ne peux pas calculer l'amour avec toi-même !")
-            return
-        
+        is_self = author.id == target_user.id
         percentage = await self.get_or_calculate_love(author.id, target_user.id)
-        comment = self.get_love_comment(percentage)
+        comment = self.get_love_comment(percentage, is_self)
         
         # Create love image
         image_data = await self.create_love_image(author, target_user, percentage)
         file = discord.File(image_data, filename="lovecalc_result.png")
         
-        message = f"__**{author.display_name}**__ 💕 __**{target_user.display_name}**__\n\n"
+        if is_self:
+            message = f"__**{author.display_name}**__ 💕 __**{author.display_name}**__\n\n"
+        else:
+            message = f"__**{author.display_name}**__ 💕 __**{target_user.display_name}**__\n\n"
+        
         message += f"🎯 **Pourcentage d'amour : {percentage}%**\n"
         message += f"{comment}"
         
-        await ctx.send(content=message, file=file)
+        await self.rate_limiter.safe_send(ctx.channel, content=message, file=file)
     
     @discord.app_commands.command(name="lovecalc", description="Calcule le pourcentage d'amour entre deux utilisateurs")
     @discord.app_commands.describe(
@@ -253,21 +290,22 @@ class LoveCalc(commands.Cog):
             target_user = avec
             author = personne
         
-        if author.id == target_user.id:
-            await interaction.response.send_message("😅 Tu ne peux pas calculer l'amour avec toi-même !", ephemeral=True)
-            return
-        
         await interaction.response.defer()
         
+        is_self = author.id == target_user.id
         percentage = await self.get_or_calculate_love(author.id, target_user.id)
-        comment = self.get_love_comment(percentage)
+        comment = self.get_love_comment(percentage, is_self)
         
         # Create love image
         image_data = await self.create_love_image(author, target_user, percentage)
         file = discord.File(image_data, filename="lovecalc_result.png")
         
         message = f"💘 **Calcul d'amour** 💘\n"
-        message += f"**{author.display_name}** 💕 **{target_user.display_name}**\n\n"
+        if is_self:
+            message += f"**{author.display_name}** 💕 **{author.display_name}**\n\n"
+        else:
+            message += f"**{author.display_name}** 💕 **{target_user.display_name}**\n\n"
+        
         message += f"🎯 **Pourcentage d'amour : {percentage}%**\n"
         message += f"{comment}"
         
@@ -282,13 +320,29 @@ class LoveCalc(commands.Cog):
                 return
             
             # Send message in channel and delete after cooldown
-            error_msg = await ctx.send(f"⏰ {ctx.author.mention}, tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !")
-            
-            # Delete the message after the cooldown period
-            await asyncio.sleep(error.retry_after)
             try:
-                await error_msg.delete()
-            except discord.NotFound:
+                error_msg = await self.rate_limiter.safe_send(
+                    ctx.channel,
+                    f"⏰ {ctx.author.mention}, tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !"
+                )
+                
+                # Delete the message after the cooldown period
+                await asyncio.sleep(error.retry_after)
+                try:
+                    await self.rate_limiter.safe_delete(error_msg)
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+            except Exception:
+                # If rate limiter fails, don't show error message
+                pass
+        else:
+            # Only show actual errors, not rate limit issues
+            try:
+                await self.rate_limiter.safe_send(
+                    ctx.channel,
+                    f"❌ Une erreur est survenue : {str(error)}"
+                )
+            except Exception:
                 pass
     
     @lovecalc_slash.error
@@ -299,7 +353,34 @@ class LoveCalc(commands.Cog):
                 # For slash commands, we need to handle this differently
                 return
             
-            await interaction.response.send_message(f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !", ephemeral=True)
+            try:
+                await interaction.response.send_message(
+                    f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !",
+                    ephemeral=True
+                )
+            except discord.InteractionResponded:
+                try:
+                    await interaction.followup.send(
+                        f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !",
+                        ephemeral=True
+                    )
+                except Exception:
+                    pass
+        else:
+            # Only show actual errors, not rate limit issues
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        f"❌ Une erreur est survenue : {str(error)}",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.followup.send(
+                        f"❌ Une erreur est survenue : {str(error)}",
+                        ephemeral=True
+                    )
+            except Exception:
+                pass
     
     @commands.Cog.listener()
     async def on_ready(self):
