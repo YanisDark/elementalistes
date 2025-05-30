@@ -484,6 +484,16 @@ class BumpReminder(commands.Cog):
             self.save_data()
             self.reminder_active = False
             
+            # Donne 200 EXP au user qui a bumpé
+            if bump_user:
+                leveling_cog = self.bot.get_cog('LevelingSystem')
+                if leveling_cog and leveling_cog.db_ready:
+                    try:
+                        old_level, new_level, exp_gained = await leveling_cog.update_user_exp(bump_user.id, 200)
+                        logging.info(f"✅ 200 EXP attribuée à {bump_user} pour le bump (niveau {old_level} -> {new_level})")
+                    except Exception as e:
+                        logging.error(f"❌ Erreur attribution EXP bump pour {bump_user}: {e}")
+            
             # Détermine quel message transformer (priorité au personnel)
             message_to_update = None
             if self.personal_reminder_message:
@@ -496,7 +506,7 @@ class BumpReminder(commands.Cog):
             # Transforme le message approprié
             if message_to_update:
                 if bump_user:
-                    message_content = f"<a:anyayay:1377087649403109498> Serveur bumpé avec succès ! Merci à {bump_user.mention} pour avoir soutenu le serveur !"
+                    message_content = f"<a:anyayay:1377087649403109498> Serveur bumpé avec succès ! Merci à {bump_user.mention} pour avoir soutenu le serveur ! **+200 EXP**"
                 else:
                     message_content = f"<a:anyayay:1377087649403109498> Serveur bumpé avec succès ! Merci !"
                 
@@ -684,7 +694,7 @@ class BumpReminder(commands.Cog):
             incantations_mention = f"<#{self.incantations_channel_id}>" if self.incantations_channel_id else "#incantations"
             
             message_content = f"<:konatacry:1377089246766174308> Quelqu'un pourrait-il bump le serveur afin de nous soutenir ? {role_mention}\n" \
-                            f"Rendez-vous dans {incantations_mention} pour utiliser la commande bump !"
+                            f"Rendez-vous dans {incantations_mention} pour utiliser la commande bump ! *(Vous gagnerez également **200 EXP**)*"
             
             self.bump_message = await self.rate_limiter.safe_send(reminder_channel, message_content)
             

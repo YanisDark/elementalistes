@@ -8,7 +8,7 @@ import asyncio
 import os
 import aiosqlite
 import random
-from typing import Optional
+from typing import Optional, Union
 from .rate_limiter import get_rate_limiter
 
 class ModerationCog(commands.Cog):
@@ -146,9 +146,31 @@ class ModerationCog(commands.Cog):
         member_roles = [role.id for role in member.roles]
         return any(role_id in member_roles for role_id in required_roles if role_id)
     
+    async def get_user_safe(self, user_input: Union[discord.Member, discord.User, int, str]):
+        """Safely get user object from various input types"""
+        if isinstance(user_input, (discord.Member, discord.User)):
+            return user_input
+        
+        try:
+            user_id = int(user_input)
+            return await self.bot.fetch_user(user_id)
+        except (ValueError, discord.NotFound):
+            return None
+    
     async def send_dm_notification(self, user, action, reason=None, duration=None, end_time=None, is_lifted=False, warn_count=None):
         """Send DM notification to user in French"""
         try:
+            # Check if user is on the server
+            guild = self.bot.get_guild(int(os.getenv('GUILD_ID')))
+            member = guild.get_member(user.id) if guild else None
+            
+            # For banned users or users not on server, try to fetch user object
+            if not member and hasattr(user, 'id'):
+                try:
+                    user = await self.bot.fetch_user(user.id)
+                except discord.NotFound:
+                    return  # User doesn't exist
+            
             if is_lifted:
                 action_messages = {
                     "unmute": "🔊 Votre mise en sourdine sur le serveur Les Élémentalistes a été levée par un modérateur. Vous pouvez désormais participer aux conversations de nouveau.",
@@ -238,8 +260,8 @@ class ModerationCog(commands.Cog):
                 message += f"\n\n{random.choice(citations)}"
             
             await user.send(message)
-        except discord.Forbidden:
-            pass  # User has DMs disabled
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            pass  # User has DMs disabled or doesn't exist
 
     # Slash commands
     @discord.app_commands.command(name="warn", description="Avertir un utilisateur")
@@ -281,11 +303,11 @@ class ModerationCog(commands.Cog):
             try:
                 await self.rate_limiter.safe_ban(interaction.guild, user, reason=f"3 avertissements atteints - Dernier avertissement: {reason}")
                 await self.add_sanction(user.id, self.bot.user.id, interaction.guild.id, "ban", "3 avertissements atteints")
-                await interaction.followup.send(f"⚠️ {user.mention} a été averti (ID: {sanction_id}) et **banni automatiquement** pour avoir atteint 3 avertissements.")
+                await interaction.followup.send(f"⚠️ {user.mention} a été averti pour **{reason}** (ID: {sanction_id}) et **banni automatiquement** pour avoir atteint 3 avertissements.")
             except discord.Forbidden:
-                await interaction.followup.send(f"⚠️ {user.mention} a été averti (ID: {sanction_id}) mais je n'ai pas pu le bannir automatiquement.")
+                await interaction.followup.send(f"⚠️ {user.mention} a été averti pour **{reason}** (ID: {sanction_id}) mais je n'ai pas pu le bannir automatiquement.")
         else:
-            await interaction.followup.send(f"⚠️ {user.mention} a été averti (ID: {sanction_id}). **{warn_count}/3 avertissements actifs**.")
+            await interaction.followup.send(f"⚠️ {user.mention} a été averti pour **{reason}** (ID: {sanction_id}). **{warn_count}/3 avertissements actifs**.")
     
     @discord.app_commands.command(name="mute", description="Mettre en sourdine un utilisateur")
     @discord.app_commands.describe(
@@ -328,7 +350,7 @@ class ModerationCog(commands.Cog):
             timeout_until = discord.utils.utcnow() + timedelta(seconds=duration_seconds)
             await self.rate_limiter.safe_member_edit(user, timed_out_until=timeout_until, reason=reason)
             sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "mute", reason, duration_seconds)
-            await interaction.followup.send(f"🔇 {user.mention} a été mis en sourdine pour {self.format_duration(duration_seconds)} (ID: {sanction_id}).")
+            await interaction.followup.send(f"🔇 {user.mention} a été mis en sourdine pour {self.format_duration(duration_seconds)} pour **{reason}** (ID: {sanction_id}).")
         except discord.Forbidden:
             await interaction.followup.send("❌ Je n'ai pas la permission de mettre cet utilisateur en sourdine.")
     
@@ -373,16 +395,16 @@ class ModerationCog(commands.Cog):
             timeout_until = discord.utils.utcnow() + timedelta(seconds=duration_seconds)
             await self.rate_limiter.safe_member_edit(user, timed_out_until=timeout_until, reason=reason)
             sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "timeout", reason, duration_seconds)
-            await interaction.followup.send(f"🔇 {user.mention} a été mis en timeout pour {self.format_duration(duration_seconds)} (ID: {sanction_id}).")
+            await interaction.followup.send(f"🔇 {user.mention} a été mis en timeout pour {self.format_duration(duration_seconds)} pour **{reason}** (ID: {sanction_id}).")
         except discord.Forbidden:
             await interaction.followup.send("❌ Je n'ai pas la permission de mettre cet utilisateur en timeout.")
     
     @discord.app_commands.command(name="ban", description="Bannir définitivement un utilisateur")
     @discord.app_commands.describe(
-        user="L'utilisateur à bannir définitivement",
+        user="L'utilisateur à bannir (membre ou ID)",
         reason="Raison du bannissement"
     )
-    async def ban_slash(self, interaction: discord.Interaction, user: discord.Member, reason: str):
+    async def ban_slash(self, interaction: discord.Interaction, user: str, reason: str):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         moderator_role = os.getenv('MODERATOR_ROLE_ID')
         
@@ -396,21 +418,50 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
-        if user.bot:
-            await interaction.response.send_message("❌ Impossible de bannir un bot.", ephemeral=True)
-            return
-        
         await interaction.response.defer()
         
+        # Try to get user object
+        target_user = None
+        user_id = None
+        
+        # Check if it's a mention or ID
+        if user.startswith('<@') and user.endswith('>'):
+            # It's a mention
+            user_id = int(user.strip('<@!>'))
+        else:
+            # Try to parse as ID
+            try:
+                user_id = int(user)
+            except ValueError:
+                await interaction.followup.send("❌ Format d'utilisateur invalide. Utilisez une mention ou un ID.")
+                return
+        
+        # Get user object
+        try:
+            # First try to get as member
+            target_user = interaction.guild.get_member(user_id)
+            if not target_user:
+                # Try to fetch user
+                target_user = await self.bot.fetch_user(user_id)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Utilisateur non trouvé.")
+            return
+        
+        if target_user.bot:
+            await interaction.followup.send("❌ Impossible de bannir un bot.")
+            return
+        
         # Send DM before applying punishment
-        await self.send_dm_notification(user, "ban", reason)
+        await self.send_dm_notification(target_user, "ban", reason)
         
         try:
-            await self.rate_limiter.safe_ban(interaction.guild, user, reason=reason)
-            sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "ban", reason)
-            await interaction.followup.send(f"🔨 {user.mention} a été banni définitivement (ID: {sanction_id}).")
+            await self.rate_limiter.safe_ban(interaction.guild, target_user, reason=reason)
+            sanction_id = await self.add_sanction(target_user.id, interaction.user.id, interaction.guild.id, "ban", reason)
+            await interaction.followup.send(f"🔨 {target_user.mention} a été banni définitivement pour **{reason}** (ID: {sanction_id}).")
         except discord.Forbidden:
             await interaction.followup.send("❌ Je n'ai pas la permission de bannir cet utilisateur.")
+        except discord.NotFound:
+            await interaction.followup.send("❌ Utilisateur non trouvé.")
     
     @discord.app_commands.command(name="kick", description="Expulser un utilisateur")
     @discord.app_commands.describe(
@@ -443,7 +494,7 @@ class ModerationCog(commands.Cog):
         try:
             await self.rate_limiter.safe_kick(user, reason=reason)
             sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "kick", reason)
-            await interaction.followup.send(f"👋 {user.mention} a été expulsé (ID: {sanction_id}).")
+            await interaction.followup.send(f"👋 {user.mention} a été expulsé pour **{reason}** (ID: {sanction_id}).")
         except discord.Forbidden:
             await interaction.followup.send("❌ Je n'ai pas la permission d'expulser cet utilisateur.")
     
@@ -513,8 +564,8 @@ class ModerationCog(commands.Cog):
             return
         
         try:
-            user_id = int(user_id)
-            user = await self.bot.fetch_user(user_id)
+            user_id_int = int(user_id)
+            user = await self.bot.fetch_user(user_id_int)
             await self.rate_limiter.safe_unban(interaction.guild, user)
             await self.send_dm_notification(user, "unban", is_lifted=True)
             await interaction.response.send_message(f"✅ {user.mention} a été débanni.")
@@ -527,9 +578,9 @@ class ModerationCog(commands.Cog):
 
     @discord.app_commands.command(name="sanctions", description="Afficher les sanctions d'un utilisateur")
     @discord.app_commands.describe(
-        user="L'utilisateur dont afficher les sanctions"
+        user="L'utilisateur ou ID dont afficher les sanctions"
     )
-    async def sanctions_slash(self, interaction: discord.Interaction, user: discord.Member):
+    async def sanctions_slash(self, interaction: discord.Interaction, user: str):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         moderator_role = os.getenv('MODERATOR_ROLE_ID')
         oracle_role = os.getenv('ORACLE_ROLE_ID')
@@ -543,16 +594,39 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
-        sanctions = await self.get_user_sanctions(user.id, interaction.guild.id, active_only=False)
-        view = SanctionsView(sanctions, user)
+        # Parse user input
+        target_user = None
+        user_id = None
+        
+        # Check if it's a mention or ID
+        if user.startswith('<@') and user.endswith('>'):
+            user_id = int(user.strip('<@!>'))
+        else:
+            try:
+                user_id = int(user)
+            except ValueError:
+                await interaction.response.send_message("❌ Format d'utilisateur invalide. Utilisez une mention ou un ID.")
+                return
+        
+        # Get user object
+        try:
+            target_user = interaction.guild.get_member(user_id)
+            if not target_user:
+                target_user = await self.bot.fetch_user(user_id)
+        except discord.NotFound:
+            await interaction.response.send_message("❌ Utilisateur non trouvé.")
+            return
+        
+        sanctions = await self.get_user_sanctions(target_user.id, interaction.guild.id, active_only=False)
+        view = SanctionsView(sanctions, target_user)
         await interaction.response.send_message(embed=view.get_embed(), view=view)
     
     @discord.app_commands.command(name="remove_sanction", description="Supprimer une sanction par son ID")
     @discord.app_commands.describe(
-        user="L'utilisateur concerné",
+        user="L'utilisateur ou ID concerné",
         sanction_id="L'ID de la sanction à supprimer"
     )
-    async def remove_sanction_slash(self, interaction: discord.Interaction, user: discord.Member, sanction_id: int):
+    async def remove_sanction_slash(self, interaction: discord.Interaction, user: str, sanction_id: int):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         
         if not admin_role or admin_role == 'your_admin_role_id':
@@ -563,16 +637,39 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
+        # Parse user input
+        target_user = None
+        user_id = None
+        
+        # Check if it's a mention or ID
+        if user.startswith('<@') and user.endswith('>'):
+            user_id = int(user.strip('<@!>'))
+        else:
+            try:
+                user_id = int(user)
+            except ValueError:
+                await interaction.response.send_message("❌ Format d'utilisateur invalide. Utilisez une mention ou un ID.")
+                return
+        
+        # Get user object
+        try:
+            target_user = interaction.guild.get_member(user_id)
+            if not target_user:
+                target_user = await self.bot.fetch_user(user_id)
+        except discord.NotFound:
+            await interaction.response.send_message("❌ Utilisateur non trouvé.")
+            return
+        
         # Verify sanction exists and belongs to the user
-        sanctions = await self.get_user_sanctions(user.id, interaction.guild.id, active_only=False)
+        sanctions = await self.get_user_sanctions(target_user.id, interaction.guild.id, active_only=False)
         sanction_found = any(sanction[0] == sanction_id for sanction in sanctions)
         
         if not sanction_found:
-            await interaction.response.send_message(f"❌ Aucune sanction trouvée avec l'ID {sanction_id} pour {user.mention}.", ephemeral=True)
+            await interaction.response.send_message(f"❌ Aucune sanction trouvée avec l'ID {sanction_id} pour {target_user.mention}.", ephemeral=True)
             return
         
         await self.remove_sanction(sanction_id)
-        await interaction.response.send_message(f"✅ Sanction ID {sanction_id} supprimée pour {user.mention}.")
+        await interaction.response.send_message(f"✅ Sanction ID {sanction_id} supprimée pour {target_user.mention}.")
 
     @commands.Cog.listener()
     async def on_ready(self):

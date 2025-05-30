@@ -41,21 +41,21 @@ class LevelingSystem(commands.Cog):
             # Level rewards - Role IDs
             "level_rewards": {
                 1: 1345482254364704870,  # Sbires
-                5: 1345483379700924537,  # Affranchis
-                15: 1345483304031486042,  # Eveillés
-                30: 1345483304031486042,  # Mages
-                50: 1345483217209266267,   # Prodiges
-                70: 1345483167704023094
+                3: 1345483379700924537,  # Affranchis
+                20: 1345483304031486042,  # Eveillés
+                45: 1345483304031486042,  # Mages
+                75: 1345483217209266267,   # Prodiges
+                100: 1345483167704023094
             },
             
             # Reward messages (configurable)
             "reward_messages": {
-                1: "🌟 {user} est devenu un authentique **👤 Sbire** ! Ne t'en fais pas, tu vas avancer !",
-                5: "⚡ {user} est désormais un **✨ Affranchi** !",
-                15: "🔥 {user} est maintenant un **🔥 Éveillé** ! Tu commence à savoir utiliser la magie...",
-                30: "💎 {user} devient un **🧙 Mage** ! La puissance des éléments n'a plus de secrets pour toi...",
-                50: "👑 {user} est exceptionnel et devient un **⚡ Prodige** ! Tu deviens très fort !",
-                70: "👑 {user} a atteint le niveau ultime en devenant un **🌀 Élémentaliste** ! Tu ne fais qu'un avec les éléments !"
+                1: "🌟 {user} gagne son premier niveau ! Les choses commencent...",
+                3: "⚡ {user} est désormais un **✨ Affranchi** !",
+                20: "🔥 {user} est maintenant un **🔥 Éveillé** ! Tu commence à savoir utiliser la magie...",
+                45: "💎 {user} devient un **🧙 Mage** ! La puissance des éléments n'a plus de secrets pour toi...",
+                75: "👑 {user} est exceptionnel et devient un **⚡ Prodige** ! Tu deviens très fort !",
+                100: "👑 {user} a atteint le niveau ultime en devenant un **🌀 Élémentaliste** ! Tu ne fais qu'un avec les éléments !"
             },
             
             # Whether to remove previous level rewards when getting a higher one
@@ -221,43 +221,58 @@ class LevelingSystem(commands.Cog):
     async def safe_add_role(self, member: discord.Member, role: discord.Role, reason: str = None):
         """Ajoute un rôle de manière sécurisée avec rate limiting"""
         try:
-            return await self.rate_limiter.execute_request(
+            await self.rate_limiter.execute_request(
                 member.add_roles(role, reason=reason),
                 route=f'PATCH /guilds/{member.guild.id}/members/{member.id}',
                 major_params={'guild_id': member.guild.id}
             )
+            print(f"✅ Rôle {role.name} ajouté à {member.display_name}")
+            return True
         except discord.Forbidden:
             print(f"❌ Pas la permission d'attribuer le rôle {role.name}")
+            return False
         except discord.NotFound:
             print(f"❌ Rôle {role.name} ou membre {member.display_name} introuvable")
+            return False
         except Exception as e:
             print(f"❌ Erreur lors de l'attribution du rôle {role.name}: {e}")
+            return False
 
     async def safe_remove_role(self, member: discord.Member, role: discord.Role, reason: str = None):
         """Retire un rôle de manière sécurisée avec rate limiting"""
         try:
-            return await self.rate_limiter.execute_request(
+            await self.rate_limiter.execute_request(
                 member.remove_roles(role, reason=reason),
                 route=f'PATCH /guilds/{member.guild.id}/members/{member.id}',
                 major_params={'guild_id': member.guild.id}
             )
+            print(f"✅ Rôle {role.name} retiré de {member.display_name}")
+            return True
         except discord.Forbidden:
             print(f"❌ Pas la permission de retirer le rôle {role.name}")
+            return False
         except discord.NotFound:
             print(f"❌ Rôle {role.name} ou membre {member.display_name} introuvable")
+            return False
         except Exception as e:
             print(f"❌ Erreur lors du retrait du rôle {role.name}: {e}")
+            return False
 
     async def safe_send_message(self, channel: discord.TextChannel, content: str = None, embed: discord.Embed = None):
         """Envoie un message de manière sécurisée avec rate limiting"""
         try:
-            return await self.rate_limiter.safe_send(channel, content, embed=embed)
+            result = await self.rate_limiter.safe_send(channel, content, embed=embed)
+            print(f"✅ Message envoyé dans {channel.name}")
+            return result
         except discord.Forbidden:
             print(f"❌ Pas la permission d'envoyer un message dans {channel.name}")
+            return None
         except discord.NotFound:
             print(f"❌ Channel {channel.name} introuvable")
+            return None
         except Exception as e:
             print(f"❌ Erreur lors de l'envoi du message: {e}")
+            return None
 
     async def safe_respond(self, interaction: discord.Interaction, content: str = None, embed: discord.Embed = None, ephemeral: bool = False):
         """Répond à une interaction de manière sécurisée avec rate limiting"""
@@ -291,25 +306,32 @@ class LevelingSystem(commands.Cog):
         except Exception as e:
             print(f"❌ Erreur lors du followup: {e}")
 
-    async def sync_user_rewards(self, user_id: int):
+    async def sync_user_rewards(self, user_id: int, announce: bool = True):
         """Synchronise les récompenses avec le niveau actuel de l'utilisateur"""
         try:
+            print(f"🔄 Début synchronisation récompenses pour utilisateur {user_id}")
+            
             guild = self.bot.get_guild(int(os.getenv('GUILD_ID')))
             if not guild:
-                return
+                print(f"❌ Guild {os.getenv('GUILD_ID')} introuvable")
+                return False
             
             member = guild.get_member(user_id)
             if not member:
-                return
+                print(f"❌ Membre {user_id} introuvable dans le serveur")
+                return False
             
             user_data = await self.get_user_data(user_id)
             current_level = user_data['level']
+            print(f"📊 Niveau actuel de {member.display_name}: {current_level}")
             
             # Déterminer quelles récompenses l'utilisateur devrait avoir
             should_have_rewards = []
             for level, role_id in self.config['level_rewards'].items():
                 if current_level >= level:
                     should_have_rewards.append((level, role_id))
+            
+            print(f"🎯 Récompenses que {member.display_name} devrait avoir: {should_have_rewards}")
             
             # Récupérer les récompenses actuellement possédées
             async with aiosqlite.connect(self.db_path) as db:
@@ -319,31 +341,76 @@ class LevelingSystem(commands.Cog):
                 )
                 current_rewards = await cursor.fetchall()
             
+            print(f"📋 Récompenses actuelles en DB: {current_rewards}")
+            
             current_reward_levels = {reward[0] for reward in current_rewards}
             should_have_levels = {reward[0] for reward in should_have_rewards}
             
             # Ajouter les récompenses manquantes
             missing_rewards = should_have_levels - current_reward_levels
+            print(f"➕ Récompenses manquantes: {missing_rewards}")
+            
+            added_rewards = []
+            announced_rewards = []
+            
             for level in missing_rewards:
                 role_id = self.config['level_rewards'][level]
                 role = guild.get_role(role_id)
-                if role and role not in member.roles:
-                    await self.safe_add_role(member, role, f"Récompense niveau {level} (sync)")
+                
+                if not role:
+                    print(f"❌ Rôle {role_id} introuvable pour le niveau {level}")
+                    continue
+                
+                print(f"🔄 Tentative d'ajout du rôle {role.name} pour le niveau {level}")
+                
+                # Ajouter le rôle s'il ne l'a pas déjà
+                if role not in member.roles:
+                    success = await self.safe_add_role(member, role, f"Récompense niveau {level} (sync)")
+                    if success:
+                        added_rewards.append(level)
+                        
+                        # Enregistrer dans la DB
+                        try:
+                            async with aiosqlite.connect(self.db_path) as db:
+                                await db.execute(
+                                    "INSERT OR IGNORE INTO user_rewards (user_id, level_reached, role_id) VALUES (?, ?, ?)",
+                                    (user_id, level, role_id)
+                                )
+                                await db.commit()
+                            print(f"✅ Récompense niveau {level} enregistrée en DB")
+                        except Exception as e:
+                            print(f"❌ Erreur enregistrement DB pour niveau {level}: {e}")
+                        
+                        # Annoncer la récompense si demandé
+                        if announce:
+                            await self.announce_reward(member, level)
+                            announced_rewards.append(level)
+                    else:
+                        print(f"❌ Échec ajout rôle {role.name}")
+                else:
+                    print(f"ℹ️ {member.display_name} a déjà le rôle {role.name}")
+                    added_rewards.append(level)
                     
-                    # Enregistrer dans la DB
-                    async with aiosqlite.connect(self.db_path) as db:
-                        await db.execute(
-                            "INSERT INTO user_rewards (user_id, level_reached, role_id) VALUES (?, ?, ?)",
-                            (user_id, level, role_id)
-                        )
-                        await db.commit()
+                    # S'assurer que c'est en DB même s'il a déjà le rôle
+                    try:
+                        async with aiosqlite.connect(self.db_path) as db:
+                            await db.execute(
+                                "INSERT OR IGNORE INTO user_rewards (user_id, level_reached, role_id) VALUES (?, ?, ?)",
+                                (user_id, level, role_id)
+                            )
+                            await db.commit()
+                    except Exception as e:
+                        print(f"❌ Erreur enregistrement DB pour niveau {level}: {e}")
                     
-                    # Annoncer la récompense
-                    await self.announce_reward(member, level)
-                    print(f"✅ Récompense niveau {level} synchronisée pour {member.display_name}")
+                    # Annoncer même si l'utilisateur a déjà le rôle (pour sync après set_activity)
+                    if announce:
+                        await self.announce_reward(member, level)
+                        announced_rewards.append(level)
             
             # Retirer les récompenses qui ne devraient plus être possédées
             excess_rewards = current_reward_levels - should_have_levels
+            print(f"➖ Récompenses en trop: {excess_rewards}")
+            
             for level in excess_rewards:
                 # Trouver le role_id correspondant
                 role_id = None
@@ -355,45 +422,88 @@ class LevelingSystem(commands.Cog):
                 if role_id:
                     role = guild.get_role(role_id)
                     if role and role in member.roles:
-                        await self.safe_remove_role(member, role, f"Niveau {level} plus atteint (sync)")
-                        print(f"✅ Rôle niveau {level} retiré de {member.display_name}")
+                        success = await self.safe_remove_role(member, role, f"Niveau {level} plus atteint (sync)")
+                        if success:
+                            print(f"✅ Rôle niveau {level} retiré de {member.display_name}")
                     
                     # Supprimer de la DB
-                    async with aiosqlite.connect(self.db_path) as db:
-                        await db.execute(
-                            "DELETE FROM user_rewards WHERE user_id = ? AND level_reached = ?",
-                            (user_id, level)
-                        )
-                        await db.commit()
+                    try:
+                        async with aiosqlite.connect(self.db_path) as db:
+                            await db.execute(
+                                "DELETE FROM user_rewards WHERE user_id = ? AND level_reached = ?",
+                                (user_id, level)
+                            )
+                            await db.commit()
+                        print(f"✅ Récompense niveau {level} supprimée de la DB")
+                    except Exception as e:
+                        print(f"❌ Erreur suppression DB pour niveau {level}: {e}")
             
             # Gérer la suppression des récompenses précédentes si configuré
             if self.config['remove_previous_rewards'] and should_have_rewards:
                 # Garder seulement la récompense de niveau le plus élevé
                 highest_level_reward = max(should_have_rewards, key=lambda x: x[0])
+                print(f"🔝 Récompense la plus élevée: niveau {highest_level_reward[0]}")
+                
                 for level, role_id in should_have_rewards:
                     if level != highest_level_reward[0]:
                         role = guild.get_role(role_id)
                         if role and role in member.roles:
-                            await self.safe_remove_role(member, role, "Récompense précédente remplacée")
-                            print(f"✅ Récompense précédente niveau {level} retirée de {member.display_name}")
+                            success = await self.safe_remove_role(member, role, "Récompense précédente remplacée")
+                            if success:
+                                print(f"✅ Récompense précédente niveau {level} retirée de {member.display_name}")
+            
+            print(f"✅ Synchronisation terminée pour {member.display_name}")
+            print(f"📢 Annonces envoyées pour les niveaux: {announced_rewards}")
+            return True
                                 
         except Exception as e:
-            print(f"Erreur sync_user_rewards: {e}")
+            print(f"❌ Erreur sync_user_rewards pour {user_id}: {e}")
+            return False
 
     async def announce_reward(self, member: discord.Member, level: int):
         """Annonce une récompense dans le channel niveaux"""
-        niveaux_channel_id = os.getenv('NIVEAUX_CHANNEL_ID')
-        if niveaux_channel_id and niveaux_channel_id != 'niveaux_channel_id':
-            channel = member.guild.get_channel(int(niveaux_channel_id))
-            if channel:
-                if level in self.config['reward_messages']:
-                    message = self.config['reward_messages'][level].format(user=member.mention)
-                    await self.safe_send_message(channel, message)
-                else:
-                    role_id = self.config['level_rewards'].get(level)
-                    role = member.guild.get_role(role_id) if role_id else None
-                    role_mention = role.mention if role else f"<@&{role_id}>"
-                    await self.safe_send_message(channel, f"🎉 {member.mention} a atteint le niveau {level} et obtient le rôle {role_mention} !")
+        try:
+            niveaux_channel_id = os.getenv('NIVEAUX_CHANNEL_ID')
+            print(f"📢 Tentative d'annonce pour {member.display_name} niveau {level}")
+            print(f"📢 Channel ID from env: {niveaux_channel_id}")
+            
+            if not niveaux_channel_id or niveaux_channel_id == 'niveaux_channel_id':
+                print("❌ Channel ID des niveaux non configuré")
+                return
+            
+            try:
+                channel_id = int(niveaux_channel_id)
+                channel = member.guild.get_channel(channel_id)
+            except ValueError:
+                print(f"❌ Channel ID invalide: {niveaux_channel_id}")
+                return
+            
+            if not channel:
+                print(f"❌ Channel {channel_id} introuvable")
+                return
+            
+            print(f"📢 Channel trouvé: {channel.name}")
+            
+            # Préparer le message
+            if level in self.config['reward_messages']:
+                message = self.config['reward_messages'][level].format(user=member.mention)
+                print(f"📢 Message personnalisé: {message}")
+            else:
+                role_id = self.config['level_rewards'].get(level)
+                role = member.guild.get_role(role_id) if role_id else None
+                role_mention = role.mention if role else f"<@&{role_id}>"
+                message = f"🎉 {member.mention} a atteint le niveau {level} et obtient le rôle {role_mention} !"
+                print(f"📢 Message par défaut: {message}")
+            
+            # Envoyer le message
+            result = await self.safe_send_message(channel, message)
+            if result:
+                print(f"✅ Annonce envoyée pour {member.display_name} niveau {level}")
+            else:
+                print(f"❌ Échec envoi annonce pour {member.display_name} niveau {level}")
+                
+        except Exception as e:
+            print(f"❌ Erreur announce_reward: {e}")
 
     async def check_level_rewards(self, user_id: int, old_level: int, new_level: int):
         """Vérifie et attribue les récompenses de niveau"""
@@ -408,7 +518,7 @@ class LevelingSystem(commands.Cog):
             
             # Vérifier chaque niveau entre old_level et new_level
             for level in range(old_level + 1, new_level + 1):
-                if level % 10 == 0 and level in self.config['level_rewards']:
+                if level in self.config['level_rewards']:
                     role_id = self.config['level_rewards'][level]
                     
                     # Récupérer le rôle existant
@@ -422,24 +532,29 @@ class LevelingSystem(commands.Cog):
                         continue
                     
                     # Attribuer le rôle avec rate limiting
-                    await self.safe_add_role(member, role, f"Niveau {level} atteint")
+                    success = await self.safe_add_role(member, role, f"Niveau {level} atteint")
+                    if not success:
+                        continue
                     
                     # Enregistrer la récompense
                     if self.db_ready:
-                        async with aiosqlite.connect(self.db_path) as db:
-                            await db.execute(
-                                "INSERT INTO user_rewards (user_id, level_reached, role_id) VALUES (?, ?, ?)",
-                                (user_id, level, role_id)
-                            )
-                            await db.commit()
+                        try:
+                            async with aiosqlite.connect(self.db_path) as db:
+                                await db.execute(
+                                    "INSERT OR IGNORE INTO user_rewards (user_id, level_reached, role_id) VALUES (?, ?, ?)",
+                                    (user_id, level, role_id)
+                                )
+                                await db.commit()
+                        except Exception as e:
+                            print(f"❌ Erreur enregistrement récompense: {e}")
                     
                     # Gérer la suppression des récompenses précédentes si configuré
                     if self.config['remove_previous_rewards']:
                         for prev_level, prev_role_id in self.config['level_rewards'].items():
-                            if prev_level < level and prev_level % 10 == 0:
+                            if prev_level < level:
                                 prev_role = guild.get_role(prev_role_id)
                                 if prev_role and prev_role in member.roles:
-                                    await self.safe_remove_role(prev_role, "Récompense précédente remplacée")
+                                    await self.safe_remove_role(member, prev_role, "Récompense précédente remplacée")
                     
                     # Annoncer la récompense
                     await self.announce_reward(member, level)
@@ -502,9 +617,14 @@ class LevelingSystem(commands.Cog):
         bar = "█" * filled_length + "░" * (progress_bar_length - filled_length)
         embed.add_field(name="📊 Progression vers le niveau suivant", value=f"`{bar}` {progress*100:.1f}%", inline=False)
         
-        # Prochain niveau et récompense
-        next_reward_level = ((current_level // 10) + 1) * 10
-        if next_reward_level in self.config['level_rewards']:
+        # Prochaine récompense
+        next_reward_level = None
+        for level in sorted(self.config['level_rewards'].keys()):
+            if level > current_level:
+                next_reward_level = level
+                break
+        
+        if next_reward_level:
             role_id = self.config['level_rewards'][next_reward_level]
             role = interaction.guild.get_role(role_id)
             role_mention = role.mention if role else f"<@&{role_id}>"
@@ -642,7 +762,7 @@ class LevelingSystem(commands.Cog):
 
     @tasks.loop(minutes=1)
     async def voice_exp_task(self):
-        """Donne de l'EXP aux utilisateurs en vocal chaque minute"""
+        """Donne de l'EXP aux utilisateurs en vocal chaque minute (seulement si pas seuls)"""
         if not self.voice_times or not self.db_ready:
             return
         
@@ -657,6 +777,14 @@ class LevelingSystem(commands.Cog):
                     del self.voice_times[user_id]
                 continue
             
+            # Vérifier qu'il y a d'autres utilisateurs dans le canal vocal
+            voice_channel = member.voice.channel
+            non_bot_members = [m for m in voice_channel.members if not m.bot]
+            
+            # Ne donner de l'EXP que si il y a au moins 2 membres non-bots
+            if len(non_bot_members) < 2:
+                continue
+            
             # Calculer l'EXP vocal avec multiplicateur
             base_exp = self.config['exp_per_voice_minute']
             multiplier = self.get_multiplier(member)
@@ -664,6 +792,7 @@ class LevelingSystem(commands.Cog):
             
             # Mettre à jour l'EXP
             await self.update_user_exp(user_id, final_exp, from_voice=True)
+
 
     @voice_exp_task.before_loop
     async def before_voice_exp_task(self):
@@ -748,8 +877,9 @@ class LevelingSystem(commands.Cog):
         
         old_level, new_level, _ = await self.update_user_exp(utilisateur.id, -montant)
         
-        # Synchroniser les récompenses après modification manuelle
-        asyncio.create_task(self.sync_user_rewards(utilisateur.id))
+        # Synchroniser les récompenses après modification manuelle avec annonces si niveau baisse
+        if new_level < old_level:
+            asyncio.create_task(self.sync_user_rewards(utilisateur.id, announce=True))
         
         embed = discord.Embed(
             title="✅ EXP Retirée",
@@ -791,8 +921,8 @@ class LevelingSystem(commands.Cog):
                 )
                 await db.commit()
             
-            # Synchroniser toutes les récompenses
-            asyncio.create_task(self.sync_user_rewards(utilisateur.id))
+            # Synchroniser toutes les récompenses avec annonces
+            asyncio.create_task(self.sync_user_rewards(utilisateur.id, announce=True))
             
             embed = discord.Embed(
                 title="✅ EXP Définie",
@@ -843,8 +973,10 @@ class LevelingSystem(commands.Cog):
                 )
                 await db.commit()
             
-            # Synchroniser les récompenses
-            asyncio.create_task(self.sync_user_rewards(utilisateur.id))
+            # Nettoyer les anciennes récompenses pour forcer une resynchronisation complète
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("DELETE FROM user_rewards WHERE user_id = ?", (utilisateur.id,))
+                await db.commit()
             
             embed = discord.Embed(
                 title="✅ Activité Définie",
@@ -853,6 +985,121 @@ class LevelingSystem(commands.Cog):
             )
             embed.add_field(name="💬 Messages", value=f"`{messages:,}`", inline=True)
             embed.add_field(name="🎤 Temps Vocal", value=f"`{temps_vocal:,}` min", inline=True)
+            embed.add_field(name="⭐ EXP Calculée", value=f"`{total_exp:,}`", inline=True)
+            embed.add_field(name="📊 Niveau", value=f"{old_level} → {new_level}", inline=False)
+            embed.add_field(name="ℹ️ Note", value="Utilisez `/sync-rewards` pour synchroniser les récompenses", inline=False)
+            
+            await self.safe_respond(interaction, embed=embed)
+        except Exception as e:
+            await self.safe_respond(interaction, "❌ Erreur lors de la mise à jour.", ephemeral=True)
+
+    @app_commands.command(name="set-voice-activity", description="Définit le temps vocal d'un utilisateur et recalcule l'EXP (Admin)")
+    @app_commands.describe(
+        utilisateur="L'utilisateur dont modifier le temps vocal",
+        temps_vocal="Temps vocal en minutes"
+    )
+    async def set_voice_activity(self, interaction: discord.Interaction, utilisateur: discord.Member, temps_vocal: int):
+        """Définit le temps vocal d'un utilisateur et recalcule l'EXP"""
+        if not self.is_admin(interaction.user):
+            await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+            return
+        
+        if not self.db_ready:
+            await self.safe_respond(interaction, "❌ Base de données non disponible.", ephemeral=True)
+            return
+        
+        if temps_vocal < 0:
+            await self.safe_respond(interaction, "❌ Le temps vocal ne peut pas être négatif.", ephemeral=True)
+            return
+        
+        try:
+            # Récupérer les données actuelles
+            user_data = await self.get_user_data(utilisateur.id)
+            current_messages = user_data['total_messages']
+            old_level = user_data['level']
+            old_voice_time = user_data['voice_time']
+            
+            # Calculer l'EXP total avec le nouveau temps vocal
+            total_exp = self.calculate_exp_from_activity(current_messages, temps_vocal)
+            new_level = self.calculate_level(total_exp)
+            
+            # Mettre à jour la base de données
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """UPDATE user_levels 
+                       SET exp = ?, level = ?, voice_time = ?, updated_at = CURRENT_TIMESTAMP 
+                       WHERE user_id = ?""",
+                    (total_exp, new_level, temps_vocal, utilisateur.id)
+                )
+                await db.commit()
+            
+            # Synchroniser les récompenses avec annonces
+            asyncio.create_task(self.sync_user_rewards(utilisateur.id, announce=True))
+            
+            embed = discord.Embed(
+                title="✅ Temps Vocal Défini",
+                description=f"Temps vocal de {utilisateur.mention} mis à jour",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="🎤 Temps Vocal", value=f"`{old_voice_time:,}` → `{temps_vocal:,}` min", inline=True)
+            embed.add_field(name="💬 Messages", value=f"`{current_messages:,}` (inchangé)", inline=True)
+            embed.add_field(name="⭐ EXP Calculée", value=f"`{total_exp:,}`", inline=True)
+            embed.add_field(name="📊 Niveau", value=f"{old_level} → {new_level}", inline=False)
+            
+            await self.safe_respond(interaction, embed=embed)
+        except Exception as e:
+            await self.safe_respond(interaction, "❌ Erreur lors de la mise à jour.", ephemeral=True)
+
+    @app_commands.command(name="set-text-activity", description="Définit les messages d'un utilisateur et recalcule l'EXP (Admin)")
+    @app_commands.describe(
+        utilisateur="L'utilisateur dont modifier les messages",
+        messages="Nombre de messages"
+    )
+    async def set_text_activity(self, interaction: discord.Interaction, utilisateur: discord.Member, messages: int):
+        """Définit les messages d'un utilisateur et recalcule l'EXP"""
+        if not self.is_admin(interaction.user):
+            await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+            return
+        
+        if not self.db_ready:
+            await self.safe_respond(interaction, "❌ Base de données non disponible.", ephemeral=True)
+            return
+        
+        if messages < 0:
+            await self.safe_respond(interaction, "❌ Le nombre de messages ne peut pas être négatif.", ephemeral=True)
+            return
+        
+        try:
+            # Récupérer les données actuelles
+            user_data = await self.get_user_data(utilisateur.id)
+            current_voice_time = user_data['voice_time']
+            old_level = user_data['level']
+            old_messages = user_data['total_messages']
+            
+            # Calculer l'EXP total avec le nouveau nombre de messages
+            total_exp = self.calculate_exp_from_activity(messages, current_voice_time)
+            new_level = self.calculate_level(total_exp)
+            
+            # Mettre à jour la base de données
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """UPDATE user_levels 
+                       SET exp = ?, level = ?, total_messages = ?, updated_at = CURRENT_TIMESTAMP 
+                       WHERE user_id = ?""",
+                    (total_exp, new_level, messages, utilisateur.id)
+                )
+                await db.commit()
+            
+            # Synchroniser les récompenses avec annonces
+            asyncio.create_task(self.sync_user_rewards(utilisateur.id, announce=True))
+            
+            embed = discord.Embed(
+                title="✅ Messages Définis",
+                description=f"Messages de {utilisateur.mention} mis à jour",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="💬 Messages", value=f"`{old_messages:,}` → `{messages:,}`", inline=True)
+            embed.add_field(name="🎤 Temps Vocal", value=f"`{current_voice_time:,}` min (inchangé)", inline=True)
             embed.add_field(name="⭐ EXP Calculée", value=f"`{total_exp:,}`", inline=True)
             embed.add_field(name="📊 Niveau", value=f"{old_level} → {new_level}", inline=False)
             
@@ -879,17 +1126,79 @@ class LevelingSystem(commands.Cog):
         )
         
         try:
-            await self.sync_user_rewards(utilisateur.id)
+            success = await self.sync_user_rewards(utilisateur.id, announce=True)
             
-            embed = discord.Embed(
-                title="✅ Récompenses Synchronisées",
-                description=f"Les récompenses de {utilisateur.mention} ont été synchronisées avec son niveau actuel.",
-                color=discord.Color.green()
-            )
+            if success:
+                embed = discord.Embed(
+                    title="✅ Récompenses Synchronisées",
+                    description=f"Les récompenses de {utilisateur.mention} ont été synchronisées avec son niveau actuel.",
+                    color=discord.Color.green()
+                )
+            else:
+                embed = discord.Embed(
+                    title="⚠️ Synchronisation Partielle",
+                    description=f"La synchronisation de {utilisateur.mention} a rencontré des problèmes. Consultez les logs pour plus de détails.",
+                    color=discord.Color.orange()
+                )
             
             await self.safe_followup(interaction, embed=embed)
         except Exception as e:
+            print(f"❌ Erreur sync_rewards_command: {e}")
             await self.safe_followup(interaction, "❌ Erreur lors de la synchronisation.", ephemeral=True)
+
+    @app_commands.command(name="sync-all-rewards", description="Synchronise les récompenses de tous les utilisateurs (Admin)")
+    async def sync_all_rewards_command(self, interaction: discord.Interaction):
+        """Synchronise les récompenses de tous les utilisateurs avec leurs niveaux actuels"""
+        if not self.is_admin(interaction.user):
+            await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
+            return
+        
+        if not self.db_ready:
+            await self.safe_respond(interaction, "❌ Base de données non disponible.", ephemeral=True)
+            return
+        
+        await self.rate_limiter.execute_request(
+            interaction.response.defer(),
+            route='POST /interactions/{interaction_id}/{interaction_token}/callback',
+            major_params={'interaction_id': interaction.id}
+        )
+        
+        try:
+            # Récupérer tous les utilisateurs avec des niveaux
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute("SELECT user_id FROM user_levels WHERE level > 0")
+                user_ids = [row[0] for row in await cursor.fetchall()]
+            
+            print(f"🔄 Début synchronisation globale pour {len(user_ids)} utilisateurs")
+            
+            synced_count = 0
+            failed_count = 0
+            
+            for user_id in user_ids:
+                try:
+                    success = await self.sync_user_rewards(user_id, announce=True)
+                    if success:
+                        synced_count += 1
+                    else:
+                        failed_count += 1
+                    # Petit délai pour éviter le rate limiting
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"❌ Erreur sync user {user_id}: {e}")
+                    failed_count += 1
+            
+            embed = discord.Embed(
+                title="✅ Synchronisation Globale Terminée",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="✅ Succès", value=f"`{synced_count}`", inline=True)
+            embed.add_field(name="❌ Échecs", value=f"`{failed_count}`", inline=True)
+            embed.add_field(name="📊 Total", value=f"`{len(user_ids)}`", inline=True)
+            
+            await self.safe_followup(interaction, embed=embed)
+        except Exception as e:
+            print(f"❌ Erreur sync_all_rewards_command: {e}")
+            await self.safe_followup(interaction, "❌ Erreur lors de la synchronisation globale.", ephemeral=True)
 
     @app_commands.command(name="toggle-remove-previous", description="Active/désactive la suppression des récompenses précédentes (Admin)")
     async def toggle_remove_previous(self, interaction: discord.Interaction):
@@ -910,7 +1219,7 @@ class LevelingSystem(commands.Cog):
         await self.safe_respond(interaction, embed=embed)
 
     @app_commands.command(name="level-debug", description="Informations de debug pour le système de niveau (Admin)")
-    async def level_debug(self, interaction: discord.Interaction):
+    async def level_debug(self, interaction: discord.Interaction, utilisateur: Optional[discord.Member] = None):
         """Commande de debug pour vérifier l'état du système"""
         if not self.is_admin(interaction.user):
             await self.safe_respond(interaction, "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
@@ -950,6 +1259,28 @@ class LevelingSystem(commands.Cog):
         # Rate limiter stats
         metrics = self.rate_limiter.get_metrics()
         embed.add_field(name="Rate Limiter", value=f"Req: {metrics['total_requests']}\nRL: {metrics['rate_limited_requests']}", inline=True)
+        
+        # Channel niveaux
+        niveaux_channel_id = os.getenv('NIVEAUX_CHANNEL_ID')
+        if niveaux_channel_id and niveaux_channel_id != 'niveaux_channel_id':
+            channel = interaction.guild.get_channel(int(niveaux_channel_id))
+            channel_status = f"✅ {channel.name}" if channel else "❌ Introuvable"
+        else:
+            channel_status = "❌ Non configuré"
+        embed.add_field(name="Channel Niveaux", value=channel_status, inline=True)
+        
+        # Debug utilisateur spécifique
+        if utilisateur:
+            user_data = await self.get_user_data(utilisateur.id)
+            embed.add_field(name=f"Debug {utilisateur.display_name}", 
+                          value=f"Niveau: {user_data['level']}\nEXP: {user_data['exp']:,}", 
+                          inline=False)
+            
+            # Vérifier les rôles actuels
+            user_roles = [role.name for role in utilisateur.roles if role.id in self.config['level_rewards'].values()]
+            embed.add_field(name="Rôles de niveau actuels", 
+                          value=", ".join(user_roles) if user_roles else "Aucun", 
+                          inline=False)
         
         await self.safe_respond(interaction, embed=embed, ephemeral=True)
 
