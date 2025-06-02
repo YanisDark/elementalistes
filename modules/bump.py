@@ -20,10 +20,8 @@ class BumpReminder(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.bump_message = None
-        self.personal_reminder_message = None
         self.last_bump_time = None
         self.last_general_reminder_time = None
-        self.last_personal_reminder_time = None
         self.data_file = "bump_data.json"
         self.initialized = False
         self.reminder_active = False
@@ -43,8 +41,6 @@ class BumpReminder(commands.Cog):
         # Cache pour optimiser les performances
         self._cached_guild = None
         self._cached_channels = {}
-        self._recent_active_members = set()
-        self._last_member_scan = None
         
         # Configuration depuis .env
         self._load_config()
@@ -81,8 +77,6 @@ class BumpReminder(commands.Cog):
                     self.last_bump_time = datetime.fromisoformat(data['last_bump_time'])
                 if data.get('last_general_reminder_time'):
                     self.last_general_reminder_time = datetime.fromisoformat(data['last_general_reminder_time'])
-                if data.get('last_personal_reminder_time'):
-                    self.last_personal_reminder_time = datetime.fromisoformat(data['last_personal_reminder_time'])
         except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
             logging.info("Aucune donnée de bump trouvée")
             
@@ -93,8 +87,6 @@ class BumpReminder(commands.Cog):
             data['last_bump_time'] = self.last_bump_time.isoformat()
         if self.last_general_reminder_time:
             data['last_general_reminder_time'] = self.last_general_reminder_time.isoformat()
-        if self.last_personal_reminder_time:
-            data['last_personal_reminder_time'] = self.last_personal_reminder_time.isoformat()
         try:
             with open(self.data_file, 'w') as f:
                 json.dump(data, f)
@@ -191,31 +183,10 @@ class BumpReminder(commands.Cog):
         else:
             last_reminder_france = self.last_general_reminder_time.astimezone(self.france_tz)
         return now - last_reminder_france
-    
-    def time_since_last_personal_reminder(self):
-        """Retourne le temps écoulé depuis le dernier rappel personnel"""
-        if not self.last_personal_reminder_time:
-            return timedelta(hours=999)
-        now = self.get_france_time()
-        if self.last_personal_reminder_time.tzinfo is None:
-            last_personal_france = pytz.utc.localize(self.last_personal_reminder_time).astimezone(self.france_tz)
-        else:
-            last_personal_france = self.last_personal_reminder_time.astimezone(self.france_tz)
-        return now - last_personal_france
         
     def can_send_reminder(self):
         """Vérifie si on peut envoyer un rappel (2 heures écoulées)"""
         return self.time_since_last_bump() >= timedelta(hours=2)
-    
-    def should_send_personal_reminder(self):
-        """Vérifie si on doit envoyer un rappel personnel"""
-        time_since_general = self.time_since_last_general_reminder()
-        time_since_personal = self.time_since_last_personal_reminder()
-        
-        if time_since_general >= timedelta(minutes=15):
-            if time_since_personal >= timedelta(minutes=30):
-                return True
-        return False
 
     async def clear_old_bump_messages(self):
         """Nettoie les anciens messages de bump au démarrage"""
@@ -235,7 +206,7 @@ class BumpReminder(commands.Cog):
             bump_keywords = [
                 "bump le serveur",
                 "serveur bumpé avec succès",
-                "pourrais-tu bump",
+                "quelqu'un pourrait-il bump",
                 "bump afin de",
                 "<:konatacry:",
                 "<a:anyayay:",
@@ -327,97 +298,8 @@ class BumpReminder(commands.Cog):
         except Exception as e:
             logging.error(f"Erreur envoi message bump: {e}")
     
-    async def update_active_members_cache(self):
-        """Met à jour le cache des membres actifs avec optimisations"""
-        try:
-            now = datetime.utcnow()
-            
-            # Ne scan qu'une fois toutes les 5 minutes
-            if (self._last_member_scan and 
-                now - self._last_member_scan < timedelta(minutes=5)):
-                return
-            
-            guild = await self.get_guild_safe()
-            if not guild:
-                return
-            
-            cutoff_time = now - timedelta(minutes=10)
-            new_active_members = set()
-            
-            # Limite à quelques canaux principaux pour éviter trop de requêtes
-            priority_channels = [
-                self.bump_reminder_channel_id,
-                self.incantations_channel_id
-            ]
-            
-            for channel_id in priority_channels:
-                if not channel_id:
-                    continue
-                    
-                channel = await self.get_channel_safe(channel_id)
-                if not channel:
-                    continue
-                    
-                try:
-                    # Limite stricte des messages vérifiés
-                    async for message in channel.history(limit=15, after=cutoff_time):
-                        if not message.author.bot and message.author != guild.me:
-                            new_active_members.add(message.author)
-                                
-                except Exception as e:
-                    logging.error(f"Erreur scan canal {channel.name}: {e}")
-                    continue
-                    
-            self._recent_active_members = new_active_members
-            self._last_member_scan = now
-            logging.info(f"Cache mis à jour: {len(new_active_members)} membres actifs")
-            
-        except Exception as e:
-            logging.error(f"Erreur mise à jour cache membres: {e}")
-    
-    async def get_recent_active_member(self):
-        """Trouve un membre actif depuis le cache"""
-        await self.update_active_members_cache()
-        
-        if self._recent_active_members:
-            return random.choice(list(self._recent_active_members))
-        return None
-    
-    async def send_personal_bump_reminder(self, member):
-        """Envoie un rappel personnel de bump à un membre"""
-        try:
-            if not member:
-                return False
-                
-            reminder_channel = await self.get_channel_safe(self.bump_reminder_channel_id)
-            if not reminder_channel:
-                return False
-            
-            incantations_mention = f"<#{self.incantations_channel_id}>" if self.incantations_channel_id else "#incantations"
-            
-            message_content = f"<:konatacry:1377089246766174308> {member.mention}, pourrais-tu bump le serveur afin de nous soutenir ?\n" \
-                            f"Rendez-vous dans {incantations_mention} pour utiliser la commande bump !\n\n" \
-                            f"*Si quelqu'un d'autre bump, ça me va aussi :)*"
-            
-            sent_message = await self.rate_limiter.safe_send(reminder_channel, message_content)
-            
-            if sent_message:
-                # Stocke le message personnel pour pouvoir le transformer plus tard
-                self.personal_reminder_message = sent_message
-                self.last_personal_reminder_time = datetime.utcnow()
-                self.save_data()
-                
-                france_time = self.convert_to_france_time(self.last_personal_reminder_time)
-                logging.info(f"Rappel personnel envoyé à {member.display_name} à {france_time}")
-                return True
-            return False
-                
-        except Exception as e:
-            logging.error(f"Erreur envoi rappel personnel: {e}")
-            return False
-    
     def find_bump_user_from_interaction(self, message):
-        """NOUVELLE MÉTHODE: Trouve l'utilisateur via message.interaction"""
+        """Trouve l'utilisateur via message.interaction"""
         try:
             # Méthode principale: Utilise message.interaction
             if hasattr(message, 'interaction') and message.interaction:
@@ -480,7 +362,6 @@ class BumpReminder(commands.Cog):
             # Met à jour le temps du dernier bump et reset les timers
             self.last_bump_time = datetime.utcnow()
             self.last_general_reminder_time = None
-            self.last_personal_reminder_time = None
             self.save_data()
             self.reminder_active = False
             
@@ -494,30 +375,22 @@ class BumpReminder(commands.Cog):
                     except Exception as e:
                         logging.error(f"❌ Erreur attribution EXP bump pour {bump_user}: {e}")
             
-            # Détermine quel message transformer (priorité au personnel)
-            message_to_update = None
-            if self.personal_reminder_message:
-                message_to_update = self.personal_reminder_message
-                self.personal_reminder_message = None
-            elif self.bump_message:
-                message_to_update = self.bump_message
-                self.bump_message = None
-            
-            # Transforme le message approprié
-            if message_to_update:
+            # Transforme le message de rappel
+            if self.bump_message:
                 if bump_user:
                     message_content = f"<a:anyayay:1377087649403109498> Serveur bumpé avec succès ! Merci à {bump_user.mention} pour avoir soutenu le serveur ! **+200 EXP**"
                 else:
                     message_content = f"<a:anyayay:1377087649403109498> Serveur bumpé avec succès ! Merci !"
                 
-                await self.rate_limiter.safe_edit(message_to_update, content=message_content)
+                await self.rate_limiter.safe_edit(self.bump_message, content=message_content)
                 
                 france_time = self.convert_to_france_time(self.last_bump_time)
                 logging.info(f"Message de bump mis à jour pour {bump_user or 'utilisateur inconnu'} à {france_time}")
                 
                 # Supprime le message après 5 minutes
                 await asyncio.sleep(300)
-                await self.rate_limiter.safe_delete(message_to_update)
+                await self.rate_limiter.safe_delete(self.bump_message)
+                self.bump_message = None
             
             logging.info(f"✅ Bump traité pour {bump_user or 'utilisateur inconnu'}")
                 
@@ -544,11 +417,9 @@ class BumpReminder(commands.Cog):
         # Détecte le dernier bump depuis l'historique
         await self.detect_last_bump_from_history()
         
-        # Démarre les systèmes de surveillance
+        # Démarre le système de surveillance
         if not self.bump_monitor_task.is_running():
             self.bump_monitor_task.start()
-        if not self.personal_reminder_task.is_running():
-            self.personal_reminder_task.start()
             
         # Si assez de temps s'est écoulé, envoie un rappel
         if self.can_send_reminder():
@@ -565,7 +436,7 @@ class BumpReminder(commands.Cog):
             
     @commands.Cog.listener()
     async def on_interaction(self, interaction):
-        """Capture les interactions bump pour backup (garde la version existante)"""
+        """Capture les interactions bump pour backup"""
         try:
             if interaction.guild and interaction.guild.id == self.guild_id:
                 
@@ -628,8 +499,6 @@ class BumpReminder(commands.Cog):
         """Déchargement du module"""
         if self.bump_monitor_task.is_running():
             self.bump_monitor_task.cancel()
-        if self.personal_reminder_task.is_running():
-            self.personal_reminder_task.cancel()
             
     @tasks.loop(minutes=2)
     async def bump_monitor_task(self):
@@ -644,30 +513,6 @@ class BumpReminder(commands.Cog):
                 
         except Exception as e:
             logging.error(f"Erreur bump monitor task: {e}")
-    
-    @tasks.loop(minutes=10)
-    async def personal_reminder_task(self):
-        """Vérifie si un rappel personnel doit être envoyé"""
-        try:
-            if not self.initialized or not self.reminder_active:
-                return
-            
-            if self.should_send_personal_reminder():
-                # D'ABORD trouve un membre actif
-                active_member = await self.get_recent_active_member()
-                
-                if active_member:
-                    # SEULEMENT SI un membre est trouvé, supprime l'ancien message général
-                    if self.bump_message:
-                        await self.rate_limiter.safe_delete(self.bump_message)
-                        self.bump_message = None
-                    
-                    await self.send_personal_bump_reminder(active_member)
-                else:
-                    logging.info("Aucun membre actif trouvé, rappel général maintenu")
-                
-        except Exception as e:
-            logging.error(f"Erreur personal reminder task: {e}")
             
     async def send_bump_reminder(self):
         """Envoie un rappel de bump"""
@@ -741,7 +586,7 @@ class BumpReminder(commands.Cog):
                 
                 logging.info(f"💥 Bump détecté dans {message.channel.name} à {message.created_at}")
                 
-                # NOUVELLE MÉTHODE PRINCIPALE: Utilise message.interaction
+                # Utilise message.interaction
                 bump_user = self.find_bump_user_from_interaction(message)
                 
                 # Si la méthode principale échoue, utilise les méthodes de fallback
@@ -757,17 +602,13 @@ class BumpReminder(commands.Cog):
                     # Met à jour quand même le temps
                     self.last_bump_time = datetime.utcnow()
                     self.last_general_reminder_time = None
-                    self.last_personal_reminder_time = None
                     self.save_data()
                     self.reminder_active = False
                     
-                    # Supprime les messages de rappel s'ils existent
+                    # Supprime le message de rappel s'il existe
                     if self.bump_message:
                         await self.rate_limiter.safe_delete(self.bump_message)
                         self.bump_message = None
-                    if self.personal_reminder_message:
-                        await self.rate_limiter.safe_delete(self.personal_reminder_message)
-                        self.personal_reminder_message = None
                     
         except Exception as e:
             logging.error(f"Erreur détection bump: {e}")
@@ -775,14 +616,12 @@ class BumpReminder(commands.Cog):
     @commands.command(name='bump_debug')
     @commands.has_permissions(administrator=True)
     async def debug_bump(self, ctx):
-        """Affiche les informations de debug améliorées"""
+        """Affiche les informations de debug"""
         time_since = self.time_since_last_bump()
         time_since_general = self.time_since_last_general_reminder()
-        time_since_personal = self.time_since_last_personal_reminder()
         
         last_bump_france = self.convert_to_france_time(self.last_bump_time) if self.last_bump_time else None
         last_general_france = self.convert_to_france_time(self.last_general_reminder_time) if self.last_general_reminder_time else None
-        last_personal_france = self.convert_to_france_time(self.last_personal_reminder_time) if self.last_personal_reminder_time else None
         
         # Récupère les métriques du rate limiter
         metrics = self.rate_limiter.get_metrics()
@@ -797,7 +636,7 @@ class BumpReminder(commands.Cog):
         pending_bumps_str = ", ".join([f"{data['user'].display_name} ({datetime.utcfromtimestamp(data['timestamp']).strftime('%H:%M:%S')})" 
                                       for user_id, data in self.pending_bumps.items()])
         
-        debug_info = f"""**🔧 Debug Bump System (Avec message.interaction)**
+        debug_info = f"""**🔧 Debug Bump System**
 
 **Méthodes de Détection:**
 • **1. message.interaction** ✅ (Méthode principale)
@@ -806,9 +645,7 @@ class BumpReminder(commands.Cog):
 **État:**
 • Système initialisé: `{self.initialized}`
 • Rappel actif: `{self.reminder_active}`
-• Message de rappel général: `{bool(self.bump_message)}`
-• Message de rappel personnel: `{bool(self.personal_reminder_message)}`
-• Membres actifs en cache: `{len(self._recent_active_members)}`
+• Message de rappel: `{bool(self.bump_message)}`
 
 **Caches Backup:**
 • **recent_bump_users:** `{len(self.recent_bump_users)}`
@@ -830,8 +667,6 @@ class BumpReminder(commands.Cog):
 
 **Rappels:**
 • Dernier rappel général: `{last_general_france or 'Jamais'}`
-• Dernier rappel personnel: `{last_personal_france or 'Jamais'}`
-• Doit envoyer personnel: `{self.should_send_personal_reminder()}`
 
 **Configuration:**
 • Guild ID: `{self.guild_id}`
@@ -862,7 +697,7 @@ class BumpReminder(commands.Cog):
         )
         
         embed.add_field(
-            name="Nouvelle Méthode Principale",
+            name="Méthode Principale",
             value="✅ `message.interaction.user` - Utilisateur exact de l'interaction",
             inline=False
         )
@@ -913,20 +748,6 @@ class BumpReminder(commands.Cog):
             await ctx.send("✅ Rappel de bump forcé envoyé !")
         else:
             await ctx.send("❌ Erreur lors de l'envoi du rappel")
-    
-    @commands.command(name='bump_personal')
-    @commands.has_permissions(administrator=True)
-    async def force_personal_reminder(self, ctx):
-        """Force l'envoi d'un rappel personnel"""
-        active_member = await self.get_recent_active_member()
-        if active_member:
-            success = await self.send_personal_bump_reminder(active_member)
-            if success:
-                await ctx.send(f"✅ Rappel personnel envoyé à {active_member.mention} !")
-            else:
-                await ctx.send("❌ Erreur lors de l'envoi du rappel personnel")
-        else:
-            await ctx.send("❌ Aucun membre actif trouvé")
         
     @commands.command(name='bump_reset')
     @commands.has_permissions(administrator=True)
@@ -934,7 +755,6 @@ class BumpReminder(commands.Cog):
         """Reset le timer de bump"""
         self.last_bump_time = None
         self.last_general_reminder_time = None
-        self.last_personal_reminder_time = None
         self.reminder_active = False
         self.recent_bump_users.clear()
         self.pending_bumps.clear()
@@ -944,9 +764,6 @@ class BumpReminder(commands.Cog):
         if self.bump_message:
             await self.rate_limiter.safe_delete(self.bump_message)
             self.bump_message = None
-        if self.personal_reminder_message:
-            await self.rate_limiter.safe_delete(self.personal_reminder_message)
-            self.personal_reminder_message = None
         await ctx.send("✅ Timer de bump reseté !")
 
     @commands.command(name='bump_clean')

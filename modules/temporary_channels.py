@@ -84,14 +84,18 @@ class TemporaryChannels(commands.Cog):
     
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
+        # Handle creation channel joins
         if after.channel and after.channel.id == self.creer_vocal_id:
             await self.create_temp_channel(member)
         
-        # Handle joining temp channels
-        if after.channel and await self.is_temp_channel(after.channel.id):
+        # Handle joining temp channels (only when actually joining, not state changes)
+        if (after.channel and before.channel != after.channel and 
+            await self.is_temp_channel(after.channel.id)):
             await self.handle_join_temp_channel(after.channel, member)
         
-        if before.channel and await self.is_temp_channel(before.channel.id):
+        # Handle leaving temp channels (only when actually leaving, not mute/unmute)
+        if (before.channel and before.channel != after.channel and 
+            await self.is_temp_channel(before.channel.id)):
             await self.handle_leave_temp_channel(before.channel, member)
     
     async def handle_join_temp_channel(self, channel, member):
@@ -433,7 +437,13 @@ class TemporaryChannels(commands.Cog):
                     return
                 owner_id = row[0]
         
+        # Only send claim ownership if owner left and there are still people in channel
         if member.id == owner_id and len(channel.members) > 0:
+            # Check if we already have a claim message for this channel
+            if channel.id in self.claim_messages:
+                # Already have a claim message, don't send another
+                return
+                
             embed = discord.Embed(
                 title="👑 Canal Sans Propriétaire",
                 description=f"Le propriétaire du canal **{channel.name}** a quitté.\nSi vous êtes dans ce canal, vous pouvez en devenir le nouveau propriétaire !",

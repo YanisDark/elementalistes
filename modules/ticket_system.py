@@ -448,12 +448,25 @@ async def get_next_ticket_number():
         result = await cursor.fetchone()
         return result[0] if result else 1
 
-async def create_staff_ticket(guild, member, staff_member, reason=None):
+async def send_ticket_dm(member: discord.Member, ticket_channel: discord.TextChannel):
+    """Send DM notification to user about new ticket"""
+    try:
+        message = f"Bonjour, un membre du staff souhaite discuter avec vous. Voici le lien vers votre ticket: {ticket_channel.jump_url}"
+        await member.send(message)
+        return True
+    except discord.Forbidden:
+        return False
+    except discord.HTTPException:
+        return False
+    except Exception:
+        return False
+
+async def create_staff_ticket(guild, member, staff_member, reason=None, notify_user=False):
     category = guild.get_channel(TICKET_CATEGORY_ID)
     
     existing_ticket = discord.utils.get(category.channels, topic=f"ticket-{member.id}")
     if existing_ticket:
-        return existing_ticket, False
+        return existing_ticket, False, False
 
     ticket_number = await get_next_ticket_number()
     
@@ -480,7 +493,7 @@ async def create_staff_ticket(guild, member, staff_member, reason=None):
     )
 
     if not ticket_channel:
-        return None, False
+        return None, False, False
 
     paris_time = datetime.now(PARIS_TZ).strftime("%d/%m/%Y à %H:%M")
     
@@ -493,7 +506,13 @@ async def create_staff_ticket(guild, member, staff_member, reason=None):
 
     view = TicketManagementView()
     await rate_limiter.safe_send(ticket_channel, f"{member.mention}", embed=embed, view=view)
-    return ticket_channel, True
+    
+    # Send DM if requested
+    dm_sent = False
+    if notify_user:
+        dm_sent = await send_ticket_dm(member, ticket_channel)
+    
+    return ticket_channel, True, dm_sent
 
 async def setup_ticket_system(bot):
     # Initialize databases
@@ -585,16 +604,17 @@ class TicketCog(commands.Cog):
 
     @commands.command(name='ticket')
     @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
-    async def force_ticket(self, ctx, member: discord.Member, *, reason=None):
-        ticket_channel, created = await create_staff_ticket(ctx.guild, member, ctx.author, reason)
+    async def force_ticket(self, ctx, member: discord.Member, notifier: bool = False, *, reason=None):
+        ticket_channel, created, dm_sent = await create_staff_ticket(ctx.guild, member, ctx.author, reason, notifier)
         if created:
-            await rate_limiter.safe_send(ctx, f"✅ **Ticket créé:** {ticket_channel.mention}")
+            dm_status = " (MP envoyé)" if dm_sent else " (MP non envoyé)" if notifier else ""
+            await rate_limiter.safe_send(ctx, f"✅ **Ticket créé:** {ticket_channel.mention}{dm_status}")
         else:
             await rate_limiter.safe_send(ctx, f"❌ **Ticket existant:** {ticket_channel.mention}")
 
     @commands.command(name='ticketadd')
     @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
-    async def add_user_to_ticket(self, ctx, member: discord.Member):
+    async def add_user_to_ticket(self, ctx, member: discord.Member, notifier: bool = False):
         if not ctx.channel.name.startswith('ticket-'):
             await rate_limiter.safe_send(ctx, "❌ **Commande uniquement dans un ticket.**")
             return
@@ -617,7 +637,13 @@ class TicketCog(commands.Cog):
             except:
                 pass
         
-        await rate_limiter.safe_send(ctx, f"✅ **{member.mention} ajouté au ticket**")
+        # Send DM if requested
+        dm_status = ""
+        if notifier:
+            dm_sent = await send_ticket_dm(member, ctx.channel)
+            dm_status = " (MP envoyé)" if dm_sent else " (MP non envoyé)"
+        
+        await rate_limiter.safe_send(ctx, f"✅ **{member.mention} ajouté au ticket**{dm_status}")
 
     @commands.command(name='ticketremove')
     @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
@@ -703,7 +729,12 @@ class TicketCog(commands.Cog):
             await rate_limiter.safe_send(ctx, f"❌ Erreur lors de la vérification: {e}")
 
     @discord.app_commands.command(name="ticket", description="Créer un ticket d'entretien")
-    async def slash_ticket(self, interaction: discord.Interaction, member: discord.Member, reason: str = None):
+    @discord.app_commands.describe(
+        member="Utilisateur concerné",
+        reason="Motif du ticket",
+        notifier="Envoyer un MP à l'utilisateur"
+    )
+    async def slash_ticket(self, interaction: discord.Interaction, member: discord.Member, reason: str = None, notifier: bool = False):
         user_roles = {role.id for role in interaction.user.roles}
         if not user_roles & {GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
             await interaction.response.send_message("❌ Permissions insuffisantes.", ephemeral=True)
@@ -712,9 +743,10 @@ class TicketCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
             
         try:
-            ticket_channel, created = await create_staff_ticket(interaction.guild, member, interaction.user, reason)
+            ticket_channel, created, dm_sent = await create_staff_ticket(interaction.guild, member, interaction.user, reason, notifier)
             if created:
-                await interaction.followup.send(f"✅ **Ticket créé:** {ticket_channel.mention}")
+                dm_status = " (MP envoyé)" if dm_sent else " (MP non envoyé)" if notifier else ""
+                await interaction.followup.send(f"✅ **Ticket créé:** {ticket_channel.mention}{dm_status}")
             else:
                 await interaction.followup.send(f"❌ **Ticket existant:** {ticket_channel.mention}")
         except Exception as e:
@@ -724,7 +756,11 @@ class TicketCog(commands.Cog):
                 pass
 
     @discord.app_commands.command(name="ticketadd", description="Ajouter un utilisateur au ticket")
-    async def slash_add_user(self, interaction: discord.Interaction, member: discord.Member):
+    @discord.app_commands.describe(
+        member="Utilisateur à ajouter",
+        notifier="Envoyer un MP à l'utilisateur"
+    )
+    async def slash_add_user(self, interaction: discord.Interaction, member: discord.Member, notifier: bool = False):
         user_roles = {role.id for role in interaction.user.roles}
         if not user_roles & {GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
             await interaction.response.send_message("❌ Permissions insuffisantes.", ephemeral=True)
@@ -739,7 +775,13 @@ class TicketCog(commands.Cog):
             member: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         })
         
-        await interaction.response.send_message(f"✅ **{member.mention} ajouté au ticket**")
+        # Send DM if requested
+        dm_status = ""
+        if notifier:
+            dm_sent = await send_ticket_dm(member, interaction.channel)
+            dm_status = " (MP envoyé)" if dm_sent else " (MP non envoyé)"
+        
+        await interaction.response.send_message(f"✅ **{member.mention} ajouté au ticket**{dm_status}")
 
     @discord.app_commands.command(name="ticketremove", description="Retirer un utilisateur du ticket")
     async def slash_remove_user(self, interaction: discord.Interaction, member: discord.Member):
