@@ -79,11 +79,11 @@ class RankManagement(commands.Cog):
                 await user.add_roles(moderator_role, reason=f"Promu par {interaction.user}")
                 
                 try:
-                    await user.send(f"🎉 Félicitations ! Vous avez été promu au rang de **Modérateur** sur {guild.name} !")
+                    await user.send(f"🎉 Félicitations ! Vous avez été promu au rang de **Gardien** sur {guild.name} !")
                 except discord.Forbidden:
                     pass
                     
-                await interaction.response.send_message(f"✅ {user.mention} a été promu d'**Oracle** à **Modérateur**.")
+                await interaction.response.send_message(f"✅ {user.mention} a été promu d'**Oracle** à **Gardien**.")
                 
             except discord.Forbidden:
                 await interaction.response.send_message("❌ Je n'ai pas les permissions nécessaires pour modifier les rôles.", ephemeral=True)
@@ -119,7 +119,7 @@ class RankManagement(commands.Cog):
                 except discord.Forbidden:
                     pass
                     
-                await interaction.response.send_message(f"✅ {user.mention} a été rétrogradé de **Modérateur** à **Oracle**.")
+                await interaction.response.send_message(f"✅ {user.mention} a été rétrogradé de **Gardien** à **Oracle**.")
                 
             except discord.Forbidden:
                 await interaction.response.send_message("❌ Je n'ai pas les permissions nécessaires pour modifier les rôles.", ephemeral=True)

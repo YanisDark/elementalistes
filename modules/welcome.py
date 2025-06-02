@@ -69,6 +69,10 @@ class WelcomeView(discord.ui.View):
     )
     async def welcome_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            # Check if we're in the correct guild
+            if not self.cog.is_correct_guild(interaction.guild):
+                return
+            
             # Extract member ID from message content
             content = interaction.message.content
             member_mention_start = content.find('<@')
@@ -146,6 +150,7 @@ class Welcome(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.rate_limiter = RateLimiter()
+        self.guild_id = os.getenv('GUILD_ID')  # Add GUILD_ID check
         self.general_channel_id = os.getenv('GENERAL_CHANNEL_ID')
         self.presentations_channel_id = os.getenv('PRESENTATIONS_CHANNEL_ID')
         self.creer_vocal_channel_id = os.getenv('CREER_VOCAL_CHANNEL_ID')
@@ -178,6 +183,16 @@ class Welcome(commands.Cog):
         ]
         
         self.bot.add_view(WelcomeView(None, self))
+    
+    def is_correct_guild(self, guild):
+        """Check if the guild matches the configured GUILD_ID"""
+        if not self.guild_id or self.guild_id == 'guild_id':
+            return True  # If no guild ID specified, work in all guilds
+        
+        try:
+            return str(guild.id) == str(self.guild_id)
+        except:
+            return False
     
     def cache_member(self, member):
         """Cache member object to reduce API calls"""
@@ -241,6 +256,10 @@ class Welcome(commands.Cog):
             
             channel = self.get_cached_channel(self.general_channel_id)
             if not channel or not await self.can_delete_messages(channel):
+                return
+            
+            # Check if we're in the correct guild
+            if not self.is_correct_guild(channel.guild):
                 return
             
             print("Nettoyage des anciens messages de bienvenue...")
@@ -426,6 +445,10 @@ Amusez-vous bien ! ✨"""
         if member.bot:
             return
         
+        # Check if member joined the correct guild
+        if not self.is_correct_guild(member.guild):
+            return
+        
         # Cache member immediately
         self.cache_member(member)
         
@@ -502,6 +525,11 @@ Amusez-vous bien ! ✨"""
     @commands.has_permissions(manage_messages=True)
     async def test_welcome(self, ctx, user_id: int = None):
         """Simulate welcome message for testing"""
+        # Check if we're in the correct guild
+        if not self.is_correct_guild(ctx.guild):
+            await ctx.send("❌ Cette commande ne peut être utilisée que dans le serveur configuré.")
+            return
+        
         if user_id is None:
             await ctx.send("❌ Veuillez fournir un ID utilisateur. Usage: `!testwelcome <user_id>`")
             return
@@ -559,6 +587,11 @@ Amusez-vous bien ! ✨"""
     @commands.has_permissions(manage_messages=True)
     async def clean_welcome_messages(self, ctx):
         """Manually clean up welcome messages"""
+        # Check if we're in the correct guild
+        if not self.is_correct_guild(ctx.guild):
+            await ctx.send("❌ Cette commande ne peut être utilisée que dans le serveur configuré.")
+            return
+        
         await ctx.send("🧹 Nettoyage des messages de bienvenue en cours...")
         await self.cleanup_old_welcome_messages()
         await ctx.send("✅ Nettoyage terminé !")
@@ -566,6 +599,10 @@ Amusez-vous bien ! ✨"""
     @commands.Cog.listener()
     async def on_member_remove(self, member):
         """Event triggered when a member leaves"""
+        # Check if member left from the correct guild
+        if not self.is_correct_guild(member.guild):
+            return
+        
         await self._cleanup_member_messages(member.id)
         
         # Remove from cache
