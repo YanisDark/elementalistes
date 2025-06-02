@@ -146,6 +146,33 @@ class ModerationCog(commands.Cog):
         member_roles = [role.id for role in member.roles]
         return any(role_id in member_roles for role_id in required_roles if role_id)
     
+    def can_punish_target(self, moderator, target):
+        """Check if moderator can apply punishment to target based on role hierarchy"""
+        # If moderator has admin permissions, they can punish anyone
+        if moderator.guild_permissions.administrator:
+            return True
+        
+        # Get role IDs
+        conseil_role = os.getenv('CONSEIL_ROLE_ID')
+        admin_role = os.getenv('ADMIN_ROLE_ID')
+        
+        moderator_roles = [role.id for role in moderator.roles]
+        target_roles = [role.id for role in target.roles]
+        
+        # If moderator has admin role (Seigneurs), they can punish anyone
+        if admin_role and admin_role != 'your_admin_role_id':
+            admin_role_id = int(admin_role)
+            if admin_role_id in moderator_roles:
+                return True
+        
+        # If both have CONSEIL_ROLE_ID, moderator cannot punish target
+        if conseil_role and not conseil_role.startswith('conseil_role_id'):
+            conseil_role_id = int(conseil_role)
+            if conseil_role_id in moderator_roles and conseil_role_id in target_roles:
+                return False
+        
+        return True
+    
     def extract_message_id_from_link(self, message_link):
         """Extract message ID from Discord message link"""
         # Discord message link format: https://discord.com/channels/guild_id/channel_id/message_id
@@ -290,6 +317,10 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
+        if not self.can_punish_target(interaction.user, user):
+            await interaction.response.send_message("❌ Vous ne pouvez pas appliquer de sanction à ce membre.", ephemeral=True)
+            return
+        
         if user.bot:
             await interaction.response.send_message("❌ Impossible d'avertir un bot.", ephemeral=True)
             return
@@ -334,6 +365,10 @@ class ModerationCog(commands.Cog):
         
         if not self.has_permission(interaction.user, required_roles):
             await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+            return
+        
+        if not self.can_punish_target(interaction.user, user):
+            await interaction.response.send_message("❌ Vous ne pouvez pas appliquer de sanction à ce membre.", ephemeral=True)
             return
         
         duration_seconds = self.parse_duration(duration)
@@ -381,6 +416,10 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
+        if not self.can_punish_target(interaction.user, user):
+            await interaction.response.send_message("❌ Vous ne pouvez pas appliquer de sanction à ce membre.", ephemeral=True)
+            return
+        
         duration_seconds = self.parse_duration(duration)
         if not duration_seconds:
             await interaction.response.send_message("❌ Format de durée invalide. Exemples: 1h30m, 2d, 30s", ephemeral=True)
@@ -425,6 +464,11 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
+        # Only check punishment hierarchy if user is a member (not just User object)
+        if isinstance(user, discord.Member) and not self.can_punish_target(interaction.user, user):
+            await interaction.response.send_message("❌ Vous ne pouvez pas appliquer de sanction à ce membre.", ephemeral=True)
+            return
+        
         if user.bot:
             await interaction.response.send_message("❌ Impossible de bannir un bot.", ephemeral=True)
             return
@@ -460,6 +504,10 @@ class ModerationCog(commands.Cog):
         
         if not self.has_permission(interaction.user, required_roles):
             await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+            return
+        
+        if not self.can_punish_target(interaction.user, user):
+            await interaction.response.send_message("❌ Vous ne pouvez pas appliquer de sanction à ce membre.", ephemeral=True)
             return
         
         if user.bot:
@@ -629,7 +677,7 @@ class ModerationCog(commands.Cog):
             deleted_count = 0
             for message in messages_to_delete:
                 try:
-                    await self.rate_limiter.safe_message_delete(message)
+                    await self.rate_limiter.safe_delete(message)
                     deleted_count += 1
                 except discord.NotFound:
                     pass  # Message already deleted
@@ -691,7 +739,7 @@ class ModerationCog(commands.Cog):
             deleted_count = 0
             for message in messages_to_delete:
                 try:
-                    await self.rate_limiter.safe_message_delete(message)
+                    await self.rate_limiter.safe_delete(message)
                     deleted_count += 1
                 except discord.NotFound:
                     pass  # Message already deleted

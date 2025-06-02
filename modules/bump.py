@@ -1,3 +1,4 @@
+# modules/bump.py
 import discord
 from discord.ext import commands, tasks
 import os
@@ -57,6 +58,10 @@ class BumpReminder(commands.Cog):
             self.bump_command_id = 947088344167366698
         except (ValueError, TypeError) as e:
             logging.error(f"Erreur configuration: {e}")
+
+    def get_leveling_system(self):
+        """Récupère le système de niveau"""
+        return self.bot.get_cog('LevelingSystem')
             
     def get_france_time(self):
         """Retourne l'heure actuelle en timezone France"""
@@ -365,15 +370,20 @@ class BumpReminder(commands.Cog):
             self.save_data()
             self.reminder_active = False
             
-            # Donne 200 EXP au user qui a bumpé
+            # Incrémenter le compteur de bumps et donner 200 EXP
             if bump_user:
-                leveling_cog = self.bot.get_cog('LevelingSystem')
-                if leveling_cog and leveling_cog.db_ready:
+                leveling_system = self.get_leveling_system()
+                if leveling_system and leveling_system.db_ready:
                     try:
-                        old_level, new_level, exp_gained = await leveling_cog.update_user_exp(bump_user.id, 200)
+                        # Incrémenter le compteur de bumps
+                        new_bump_count = await leveling_system.increment_user_bumps(bump_user.id)
+                        logging.info(f"✅ Bump count incrementé pour {bump_user}: {new_bump_count}")
+                        
+                        # Donner 200 EXP
+                        old_level, new_level, exp_gained = await leveling_system.update_user_exp(bump_user.id, 200)
                         logging.info(f"✅ 200 EXP attribuée à {bump_user} pour le bump (niveau {old_level} -> {new_level})")
                     except Exception as e:
-                        logging.error(f"❌ Erreur attribution EXP bump pour {bump_user}: {e}")
+                        logging.error(f"❌ Erreur attribution EXP/bump count pour {bump_user}: {e}")
             
             # Transforme le message de rappel
             if self.bump_message:

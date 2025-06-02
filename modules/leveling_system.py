@@ -93,11 +93,18 @@ class LevelingSystem(commands.Cog):
                         level INTEGER DEFAULT 0,
                         total_messages INTEGER DEFAULT 0,
                         voice_time INTEGER DEFAULT 0,
+                        bumps_count INTEGER DEFAULT 0,
                         last_message_time TEXT,
                         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
+                
+                # Ajouter la colonne bumps_count si elle n'existe pas
+                try:
+                    await db.execute("ALTER TABLE user_levels ADD COLUMN bumps_count INTEGER DEFAULT 0")
+                except:
+                    pass  # La colonne existe déjà
                 
                 # Table des récompenses obtenues
                 await db.execute("""
@@ -113,6 +120,7 @@ class LevelingSystem(commands.Cog):
                 
                 # Créer les index pour les performances
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_user_levels_exp ON user_levels(exp DESC)")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_user_levels_bumps ON user_levels(bumps_count DESC)")
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_user_rewards_user_id ON user_rewards(user_id)")
                 
                 await db.commit()
@@ -138,12 +146,12 @@ class LevelingSystem(commands.Cog):
     async def get_user_data(self, user_id: int) -> Dict:
         """Récupère les données d'un utilisateur"""
         if not self.db_ready:
-            return {'user_id': user_id, 'exp': 0, 'level': 0, 'total_messages': 0, 'voice_time': 0}
+            return {'user_id': user_id, 'exp': 0, 'level': 0, 'total_messages': 0, 'voice_time': 0, 'bumps_count': 0}
         
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 cursor = await db.execute(
-                    "SELECT user_id, exp, level, total_messages, voice_time FROM user_levels WHERE user_id = ?",
+                    "SELECT user_id, exp, level, total_messages, voice_time, bumps_count FROM user_levels WHERE user_id = ?",
                     (user_id,)
                 )
                 result = await cursor.fetchone()
@@ -154,19 +162,71 @@ class LevelingSystem(commands.Cog):
                         'exp': result[1],
                         'level': result[2],
                         'total_messages': result[3],
-                        'voice_time': result[4]
+                        'voice_time': result[4],
+                        'bumps_count': result[5] if len(result) > 5 else 0
                     }
                 else:
                     # Créer un nouvel utilisateur
                     await db.execute(
-                        "INSERT INTO user_levels (user_id, exp, level) VALUES (?, 0, 0)",
+                        "INSERT INTO user_levels (user_id, exp, level, bumps_count) VALUES (?, 0, 0, 0)",
                         (user_id,)
                     )
                     await db.commit()
-                    return {'user_id': user_id, 'exp': 0, 'level': 0, 'total_messages': 0, 'voice_time': 0}
+                    return {'user_id': user_id, 'exp': 0, 'level': 0, 'total_messages': 0, 'voice_time': 0, 'bumps_count': 0}
         except Exception as e:
             print(f"Erreur get_user_data: {e}")
-            return {'user_id': user_id, 'exp': 0, 'level': 0, 'total_messages': 0, 'voice_time': 0}
+            return {'user_id': user_id, 'exp': 0, 'level': 0, 'total_messages': 0, 'voice_time': 0, 'bumps_count': 0}
+
+    async def increment_user_bumps(self, user_id: int) -> int:
+        """Incrémente le compteur de bumps d'un utilisateur et retourne le nouveau total"""
+        if not self.db_ready:
+            return 0
+        
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # S'assurer que l'utilisateur existe
+                await db.execute(
+                    "INSERT OR IGNORE INTO user_levels (user_id, exp, level, bumps_count) VALUES (?, 0, 0, 0)",
+                    (user_id,)
+                )
+                
+                # Incrémenter le compteur de bumps
+                await db.execute(
+                    "UPDATE user_levels SET bumps_count = bumps_count + 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    (user_id,)
+                )
+                
+                # Récupérer le nouveau total
+                cursor = await db.execute(
+                    "SELECT bumps_count FROM user_levels WHERE user_id = ?",
+                    (user_id,)
+                )
+                result = await cursor.fetchone()
+                new_count = result[0] if result else 0
+                
+                await db.commit()
+                print(f"✅ Bump count incrementé pour utilisateur {user_id}: {new_count}")
+                return new_count
+                
+        except Exception as e:
+            print(f"❌ Erreur increment_user_bumps: {e}")
+            return 0
+
+    async def get_bump_leaderboard(self, limit: int = 10) -> List[Tuple]:
+        """Récupère le classement des bumps"""
+        if not self.db_ready:
+            return []
+        
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    "SELECT user_id, bumps_count FROM user_levels WHERE bumps_count > 0 ORDER BY bumps_count DESC LIMIT ?",
+                    (limit,)
+                )
+                return await cursor.fetchall()
+        except Exception as e:
+            print(f"❌ Erreur get_bump_leaderboard: {e}")
+            return []
 
     async def update_user_exp(self, user_id: int, exp_gain: int, from_voice: bool = False):
         """Met à jour l'EXP d'un utilisateur et gère les montées de niveau"""
@@ -582,57 +642,6 @@ class LevelingSystem(commands.Cog):
             return False
         return any(role.id == int(admin_role_id) for role in user.roles)
 
-    async def display_level_info(self, interaction: discord.Interaction, utilisateur: Optional[discord.Member] = None):
-        """Fonction partagée pour afficher les informations de niveau"""
-        if not self.db_ready:
-            await self.safe_respond(interaction, "❌ Base de données non disponible. Le système de niveaux est temporairement indisponible.", ephemeral=True)
-            return
-        
-        target = utilisateur or interaction.user
-        user_data = await self.get_user_data(target.id)
-        
-        current_level = user_data['level']
-        current_exp = user_data['exp']
-        exp_for_current = self.calculate_exp_for_level(current_level)
-        exp_for_next = self.calculate_exp_for_level(current_level + 1)
-        exp_progress = current_exp - exp_for_current
-        exp_needed = exp_for_next - exp_for_current
-        
-        # Créer l'embed
-        embed = discord.Embed(
-            title=f"📊 Profil de {target.display_name}",
-            color=discord.Color.blurple()
-        )
-        embed.set_thumbnail(url=target.display_avatar.url)
-        embed.add_field(name="🎯 Niveau", value=f"`{current_level}`", inline=True)
-        embed.add_field(name="⭐ EXP Total", value=f"`{current_exp:,}`", inline=True)
-        embed.add_field(name="📈 Progression", value=f"`{exp_progress:,}/{exp_needed:,}`", inline=True)
-        embed.add_field(name="💬 Messages", value=f"`{user_data['total_messages']:,}`", inline=True)
-        embed.add_field(name="🎤 Temps Vocal", value=f"`{user_data['voice_time']:,}` min", inline=True)
-        
-        # Barre de progression
-        progress_bar_length = 20
-        progress = min(exp_progress / exp_needed, 1.0) if exp_needed > 0 else 1.0
-        filled_length = int(progress_bar_length * progress)
-        bar = "█" * filled_length + "░" * (progress_bar_length - filled_length)
-        embed.add_field(name="📊 Progression vers le niveau suivant", value=f"`{bar}` {progress*100:.1f}%", inline=False)
-        
-        # Prochaine récompense
-        next_reward_level = None
-        for level in sorted(self.config['level_rewards'].keys()):
-            if level > current_level:
-                next_reward_level = level
-                break
-        
-        if next_reward_level:
-            role_id = self.config['level_rewards'][next_reward_level]
-            role = interaction.guild.get_role(role_id)
-            role_mention = role.mention if role else f"<@&{role_id}>"
-            embed.add_field(name="🎁 Prochaine Récompense", value=f"Niveau {next_reward_level}: {role_mention}", inline=False)
-        
-        embed.set_footer(text=f"Serveur: {interaction.guild.name}")
-        await self.safe_respond(interaction, embed=embed)
-
     async def display_leaderboard(self, interaction: discord.Interaction, page: Optional[int] = 1):
         """Fonction partagée pour afficher le classement"""
         if not self.db_ready:
@@ -793,23 +802,12 @@ class LevelingSystem(commands.Cog):
             # Mettre à jour l'EXP
             await self.update_user_exp(user_id, final_exp, from_voice=True)
 
-
     @voice_exp_task.before_loop
     async def before_voice_exp_task(self):
         await self.bot.wait_until_ready()
         await self.wait_for_db()
 
     # Slash Commands
-    @app_commands.command(name="niveau", description="Affiche tes informations de niveau")
-    async def level_info(self, interaction: discord.Interaction, utilisateur: Optional[discord.Member] = None):
-        """Affiche les informations de niveau d'un utilisateur"""
-        await self.display_level_info(interaction, utilisateur)
-
-    @app_commands.command(name="level", description="Affiche tes informations de niveau")
-    async def level_alias(self, interaction: discord.Interaction, utilisateur: Optional[discord.Member] = None):
-        """Alias pour /niveau"""
-        await self.display_level_info(interaction, utilisateur)
-
     @app_commands.command(name="classement", description="Affiche le classement des niveaux")
     async def leaderboard_fr(self, interaction: discord.Interaction, page: Optional[int] = 1):
         """Affiche le leaderboard avec pagination"""
@@ -1273,7 +1271,7 @@ class LevelingSystem(commands.Cog):
         if utilisateur:
             user_data = await self.get_user_data(utilisateur.id)
             embed.add_field(name=f"Debug {utilisateur.display_name}", 
-                          value=f"Niveau: {user_data['level']}\nEXP: {user_data['exp']:,}", 
+                          value=f"Niveau: {user_data['level']}\nEXP: {user_data['exp']:,}\nBumps: {user_data['bumps_count']}", 
                           inline=False)
             
             # Vérifier les rôles actuels
@@ -1285,4 +1283,18 @@ class LevelingSystem(commands.Cog):
         await self.safe_respond(interaction, embed=embed, ephemeral=True)
 
 async def setup(bot):
-    await bot.add_cog(LevelingSystem(bot))
+    """Fonction setup avec gestion des cogs déjà chargés"""
+    try:
+        # Essaie de supprimer l'ancien cog s'il existe
+        try:
+            await bot.remove_cog('LevelingSystem')
+            print("✅ Ancien cog LevelingSystem supprimé")
+        except:
+            pass  # Le cog n'existait pas
+            
+        # Ajoute le nouveau cog
+        await bot.add_cog(LevelingSystem(bot))
+        print("✅ Nouveau cog LevelingSystem ajouté")
+    except Exception as e:
+        print(f"❌ Erreur lors du chargement du cog LevelingSystem: {e}")
+        raise
