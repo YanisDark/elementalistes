@@ -12,144 +12,148 @@ class RankManagement(commands.Cog):
         self.bot = bot
         
         # Role IDs from environment
-        self.oracle_role_id = int(os.getenv('ORACLE_ROLE_ID'))
+        self.admin_role_id = int(os.getenv('ADMIN_ROLE_ID'))
+        self.animator_role_id = int(os.getenv('ANIMATOR_ROLE_ID'))
         self.moderator_role_id = int(os.getenv('MODERATOR_ROLE_ID'))
+        self.oracle_role_id = int(os.getenv('ORACLE_ROLE_ID'))
         self.member_role_id = int(os.getenv('MEMBER_ROLE_ID'))
-        self.gerant_staff_role_id = int(os.getenv('GERANT_STAFF_ROLE_ID'))
-        self.conseil_role_id = int(os.getenv('CONSEIL_ROLE_ID'))
         
-    def has_permission(self, member, action, target_member):
-        """Check if member has permission to perform the action"""
+        # Optional roles (may not exist in env)
+        try:
+            self.gerant_staff_role_id = int(os.getenv('GERANT_STAFF_ROLE_ID'))
+        except (TypeError, ValueError):
+            self.gerant_staff_role_id = None
+            
+        try:
+            self.conseil_role_id = int(os.getenv('CONSEIL_ROLE_ID'))
+        except (TypeError, ValueError):
+            self.conseil_role_id = None
+        
+        # Rank hierarchy
+        self.ranks = {
+            "membre": {
+                "role_id": self.member_role_id,
+                "name": "Membre",
+                "level": 1
+            },
+            "oracle": {
+                "role_id": self.oracle_role_id,
+                "name": "Oracle",
+                "level": 2
+            },
+            "gardien": {
+                "role_id": self.moderator_role_id,
+                "name": "Gardien",
+                "level": 3
+            },
+            "invocateur": {
+                "role_id": self.animator_role_id,
+                "name": "Invocateur",
+                "level": 4
+            }
+        }
+        
+    def has_permission(self, member, target_rank):
+        """Check if member has permission to set the target rank"""
         if member.guild_permissions.administrator:
             return True
             
         member_roles = [role.id for role in member.roles]
-        target_roles = [role.id for role in target_member.roles]
         
-        # GERANT_STAFF can do everything
-        if self.gerant_staff_role_id in member_roles:
+        # Admin can do everything
+        if self.admin_role_id in member_roles:
             return True
             
-        # MODERATOR can only demote Oracle to Member
-        if self.moderator_role_id in member_roles and action == "demote" and self.oracle_role_id in target_roles:
+        # Gerant staff can manage all ranks except admin
+        if self.gerant_staff_role_id and self.gerant_staff_role_id in member_roles:
+            return True
+            
+        # Seigneurs (assuming this is admin role) can manage Invocateur
+        if self.admin_role_id in member_roles and target_rank == "invocateur":
+            return True
+            
+        # Moderators can only manage Oracle and Membre
+        if self.moderator_role_id in member_roles and target_rank in ["oracle", "membre"]:
             return True
             
         return False
     
-    @app_commands.command(name="promote", description="Promouvoir un utilisateur")
-    @app_commands.describe(user="L'utilisateur à promouvoir")
-    async def promote(self, interaction: discord.Interaction, user: discord.Member):
-        if not self.has_permission(interaction.user, "promote", user):
-            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
+    async def remove_all_rank_roles(self, user):
+        """Remove all rank roles from user"""
+        roles_to_remove = []
+        
+        for rank_data in self.ranks.values():
+            role = user.guild.get_role(rank_data["role_id"])
+            if role and role in user.roles:
+                roles_to_remove.append(role)
+        
+        if roles_to_remove:
+            await user.remove_roles(*roles_to_remove, reason="Changement de rang")
+    
+    @app_commands.command(name="rank", description="Définir le rang d'un utilisateur")
+    @app_commands.describe(
+        user="L'utilisateur dont modifier le rang",
+        rank="Le nouveau rang à attribuer"
+    )
+    @app_commands.choices(rank=[
+        app_commands.Choice(name="Membre", value="membre"),
+        app_commands.Choice(name="Oracle", value="oracle"),
+        app_commands.Choice(name="Gardien", value="gardien"),
+        app_commands.Choice(name="Invocateur", value="invocateur")
+    ])
+    async def rank(self, interaction: discord.Interaction, user: discord.Member, rank: str):
+        if not self.has_permission(interaction.user, rank):
+            await interaction.response.send_message("❌ Vous n'avez pas la permission de définir ce rang.", ephemeral=True)
+            return
+        
+        if rank not in self.ranks:
+            await interaction.response.send_message("❌ Rang invalide.", ephemeral=True)
             return
             
         guild = interaction.guild
-        target_roles = [role.id for role in user.roles]
+        target_rank_data = self.ranks[rank]
+        target_role = guild.get_role(target_rank_data["role_id"])
         
-        # Member → Oracle
-        if self.member_role_id in target_roles and self.oracle_role_id not in target_roles and self.moderator_role_id not in target_roles:
-            member_role = guild.get_role(self.member_role_id)
-            oracle_role = guild.get_role(self.oracle_role_id)
-            conseil_role = guild.get_role(self.conseil_role_id)
+        if not target_role:
+            await interaction.response.send_message("❌ Le rôle spécifié n'existe pas sur ce serveur.", ephemeral=True)
+            return
+        
+        # Check if user already has this rank
+        if target_role in user.roles:
+            await interaction.response.send_message(f"❌ {user.mention} a déjà le rang **{target_rank_data['name']}**.", ephemeral=True)
+            return
+        
+        try:
+            # Remove all current rank roles
+            await self.remove_all_rank_roles(user)
             
-            try:
-                await user.remove_roles(member_role, reason=f"Promu par {interaction.user}")
-                await user.add_roles(oracle_role, reason=f"Promu par {interaction.user}")
-                
+            # Add new rank role
+            await user.add_roles(target_role, reason=f"Rang défini par {interaction.user}")
+            
+            # Handle special cases for Oracle (add conseil role if available)
+            if rank == "oracle" and self.conseil_role_id:
+                conseil_role = guild.get_role(self.conseil_role_id)
                 if conseil_role:
                     await user.add_roles(conseil_role, reason=f"Promu Oracle par {interaction.user}")
-                
-                try:
-                    await user.send(f"🎉 Félicitations ! Vous avez été promu au rang d'**Oracle** sur {guild.name} !")
-                except discord.Forbidden:
-                    pass
-                    
-                await interaction.response.send_message(f"✅ {user.mention} a été promu de **Membre** à **Oracle**.")
-                
-            except discord.Forbidden:
-                await interaction.response.send_message("❌ Je n'ai pas les permissions nécessaires pour modifier les rôles.", ephemeral=True)
-                
-        # Oracle → Moderator
-        elif self.oracle_role_id in target_roles:
-            oracle_role = guild.get_role(self.oracle_role_id)
-            moderator_role = guild.get_role(self.moderator_role_id)
             
-            try:
-                await user.remove_roles(oracle_role, reason=f"Promu par {interaction.user}")
-                await user.add_roles(moderator_role, reason=f"Promu par {interaction.user}")
-                
-                try:
-                    await user.send(f"🎉 Félicitations ! Vous avez été promu au rang de **Gardien** sur {guild.name} !")
-                except discord.Forbidden:
-                    pass
-                    
-                await interaction.response.send_message(f"✅ {user.mention} a été promu d'**Oracle** à **Gardien**.")
-                
-            except discord.Forbidden:
-                await interaction.response.send_message("❌ Je n'ai pas les permissions nécessaires pour modifier les rôles.", ephemeral=True)
-                
-        else:
-            await interaction.response.send_message("❌ Cet utilisateur ne peut pas être promu ou a déjà le rang maximum.", ephemeral=True)
-    
-    @app_commands.command(name="demote", description="Rétrograder un utilisateur")
-    @app_commands.describe(user="L'utilisateur à rétrograder")
-    async def demote(self, interaction: discord.Interaction, user: discord.Member):
-        if not self.has_permission(interaction.user, "demote", user):
-            await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
-            return
-            
-        guild = interaction.guild
-        target_roles = [role.id for role in user.roles]
-        
-        # Moderator → Oracle
-        if self.moderator_role_id in target_roles:
-            moderator_role = guild.get_role(self.moderator_role_id)
-            oracle_role = guild.get_role(self.oracle_role_id)
-            conseil_role = guild.get_role(self.conseil_role_id)
-            
-            try:
-                await user.remove_roles(moderator_role, reason=f"Rétrogradé par {interaction.user}")
-                await user.add_roles(oracle_role, reason=f"Rétrogradé par {interaction.user}")
-                
-                if conseil_role:
-                    await user.add_roles(conseil_role, reason=f"Rétrogradé à Oracle par {interaction.user}")
-                
-                try:
-                    await user.send(f"📉 Vous avez été rétrogradé au rang d'**Oracle** sur {guild.name}.")
-                except discord.Forbidden:
-                    pass
-                    
-                await interaction.response.send_message(f"✅ {user.mention} a été rétrogradé de **Gardien** à **Oracle**.")
-                
-            except discord.Forbidden:
-                await interaction.response.send_message("❌ Je n'ai pas les permissions nécessaires pour modifier les rôles.", ephemeral=True)
-                
-        # Oracle → Member
-        elif self.oracle_role_id in target_roles:
-            oracle_role = guild.get_role(self.oracle_role_id)
-            member_role = guild.get_role(self.member_role_id)
-            conseil_role = guild.get_role(self.conseil_role_id)
-            
-            try:
-                await user.remove_roles(oracle_role, reason=f"Rétrogradé par {interaction.user}")
-                await user.add_roles(member_role, reason=f"Rétrogradé par {interaction.user}")
-                
-                # Remove CONSEIL_ROLE when demoted from Oracle
+            # Remove conseil role if demoting from Oracle
+            elif rank != "oracle" and self.conseil_role_id:
+                conseil_role = guild.get_role(self.conseil_role_id)
                 if conseil_role and conseil_role in user.roles:
                     await user.remove_roles(conseil_role, reason=f"Rétrogradé d'Oracle par {interaction.user}")
-                
-                try:
-                    await user.send(f"📉 Vous avez été rétrogradé au rang de **Membre** sur {guild.name}.")
-                except discord.Forbidden:
-                    pass
-                    
-                await interaction.response.send_message(f"✅ {user.mention} a été rétrogradé d'**Oracle** à **Membre**.")
-                
+            
+            # Send DM to user
+            try:
+                await user.send(f"🔄 Votre rang a été modifié sur **{guild.name}** ! Vous êtes maintenant **{target_rank_data['name']}**.")
             except discord.Forbidden:
-                await interaction.response.send_message("❌ Je n'ai pas les permissions nécessaires pour modifier les rôles.", ephemeral=True)
-                
-        else:
-            await interaction.response.send_message("❌ Cet utilisateur ne peut pas être rétrogradé ou a déjà le rang minimum.", ephemeral=True)
+                pass
+            
+            await interaction.response.send_message(f"✅ {user.mention} a été défini au rang **{target_rank_data['name']}**.")
+            
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ Je n'ai pas les permissions nécessaires pour modifier les rôles.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Une erreur s'est produite : {str(e)}", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(RankManagement(bot))

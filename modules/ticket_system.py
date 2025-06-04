@@ -19,7 +19,7 @@ TICKET_CATEGORY_ID = 1345497226528423977
 LOGS_CHANNEL_ID = 1345499403942629416
 
 # Role IDs
-GARDIEN_ROLE_ID = 1345472840979189851  # Gardien (Moderator)
+MODERATOR_ROLE_ID = 1345472840979189851  # Gardien (Moderator)
 SEIGNEUR_ROLE_ID = 1345472879168323625  # Seigneur (Admin)
 ORACLE_ROLE_ID = 1345472801364246528    # Oracle
 
@@ -206,7 +206,7 @@ class TicketButtons(discord.ui.View):
             # Get roles once and cache them
             roles = {
                 'oracle': guild.get_role(ORACLE_ROLE_ID),
-                'gardien': guild.get_role(GARDIEN_ROLE_ID),
+                'gardien': guild.get_role(MODERATOR_ROLE_ID),
                 'seigneur': guild.get_role(SEIGNEUR_ROLE_ID)
             }
             
@@ -241,7 +241,7 @@ class TicketButtons(discord.ui.View):
                 'Signalement': {
                     'title': "🚨 Nouveau Signalement",
                     'color': discord.Color.red(),
-                    'ping': f"<@&{ORACLE_ROLE_ID}> <@&{GARDIEN_ROLE_ID}>"
+                    'ping': f"<@&{ORACLE_ROLE_ID}> <@&{MODERATOR_ROLE_ID}>"
                 },
                 'Partenariat': {
                     'title': "🤝 Demande de Partenariat",
@@ -282,7 +282,7 @@ class TicketManagementView(discord.ui.View):
     @discord.ui.button(label='✋ Prendre en charge', style=discord.ButtonStyle.secondary, custom_id='take_charge')
     async def take_charge(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_roles = {role.id for role in interaction.user.roles}
-        if not user_roles & {GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
+        if not user_roles & {MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
             await interaction.response.send_message("❌ Vous n'avez pas les permissions nécessaires.", ephemeral=True)
             return
 
@@ -303,7 +303,7 @@ class TicketManagementView(discord.ui.View):
     @discord.ui.button(label='🔊 Créer le vocal', style=discord.ButtonStyle.secondary, custom_id='create_voice')
     async def create_voice(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_roles = {role.id for role in interaction.user.roles}
-        if not user_roles & {GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
+        if not user_roles & {MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
             await interaction.response.send_message("❌ Vous n'avez pas les permissions nécessaires.", ephemeral=True)
             return
 
@@ -365,7 +365,7 @@ class TicketManagementView(discord.ui.View):
     @discord.ui.button(label='🔒 Clore le ticket', style=discord.ButtonStyle.danger, custom_id='close_ticket')
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_roles = {role.id for role in interaction.user.roles}
-        if not user_roles & {GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
+        if not user_roles & {MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
             await interaction.response.send_message("❌ Vous n'avez pas les permissions nécessaires.", ephemeral=True)
             return
 
@@ -478,7 +478,7 @@ async def create_staff_ticket(guild, member, staff_member, reason=None, notify_u
     }
     
     # Add staff roles
-    for role_id in [GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID]:
+    for role_id in [MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID]:
         role = guild.get_role(role_id)
         if role:
             overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
@@ -603,7 +603,7 @@ class TicketCog(commands.Cog):
         await setup_ticket_system(self.bot)
 
     @commands.command(name='ticket')
-    @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
+    @commands.has_any_role(MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
     async def force_ticket(self, ctx, member: discord.Member, notifier: bool = False, *, reason=None):
         ticket_channel, created, dm_sent = await create_staff_ticket(ctx.guild, member, ctx.author, reason, notifier)
         if created:
@@ -613,7 +613,7 @@ class TicketCog(commands.Cog):
             await rate_limiter.safe_send(ctx, f"❌ **Ticket existant:** {ticket_channel.mention}")
 
     @commands.command(name='ticketadd')
-    @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
+    @commands.has_any_role(MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
     async def add_user_to_ticket(self, ctx, member: discord.Member, notifier: bool = False):
         if not ctx.channel.name.startswith('ticket-'):
             await rate_limiter.safe_send(ctx, "❌ **Commande uniquement dans un ticket.**")
@@ -646,7 +646,7 @@ class TicketCog(commands.Cog):
         await rate_limiter.safe_send(ctx, f"✅ **{member.mention} ajouté au ticket**{dm_status}")
 
     @commands.command(name='ticketremove')
-    @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
+    @commands.has_any_role(MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
     async def remove_user_from_ticket(self, ctx, member: discord.Member):
         if not ctx.channel.name.startswith('ticket-'):
             await rate_limiter.safe_send(ctx, "❌ **Commande uniquement dans un ticket.**")
@@ -678,7 +678,7 @@ class TicketCog(commands.Cog):
         await rate_limiter.safe_send(ctx, f"✅ **{member.mention} retiré du ticket**")
 
     @commands.command(name='rate_limit_stats')
-    @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
+    @commands.has_any_role(MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
     async def rate_limit_stats(self, ctx):
         """Check rate limiter statistics"""
         try:
@@ -701,7 +701,7 @@ class TicketCog(commands.Cog):
             await rate_limiter.safe_send(ctx, f"❌ Erreur lors de la récupération des stats: {e}")
 
     @commands.command(name='cleanup_status')
-    @commands.has_any_role(GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
+    @commands.has_any_role(MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID)
     async def cleanup_status(self, ctx):
         """Check cleanup status"""
         try:
@@ -736,7 +736,7 @@ class TicketCog(commands.Cog):
     )
     async def slash_ticket(self, interaction: discord.Interaction, member: discord.Member, reason: str = None, notifier: bool = False):
         user_roles = {role.id for role in interaction.user.roles}
-        if not user_roles & {GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
+        if not user_roles & {MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
             await interaction.response.send_message("❌ Permissions insuffisantes.", ephemeral=True)
             return
 
@@ -762,7 +762,7 @@ class TicketCog(commands.Cog):
     )
     async def slash_add_user(self, interaction: discord.Interaction, member: discord.Member, notifier: bool = False):
         user_roles = {role.id for role in interaction.user.roles}
-        if not user_roles & {GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
+        if not user_roles & {MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
             await interaction.response.send_message("❌ Permissions insuffisantes.", ephemeral=True)
             return
 
@@ -786,7 +786,7 @@ class TicketCog(commands.Cog):
     @discord.app_commands.command(name="ticketremove", description="Retirer un utilisateur du ticket")
     async def slash_remove_user(self, interaction: discord.Interaction, member: discord.Member):
         user_roles = {role.id for role in interaction.user.roles}
-        if not user_roles & {GARDIEN_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
+        if not user_roles & {MODERATOR_ROLE_ID, SEIGNEUR_ROLE_ID, ORACLE_ROLE_ID}:
             await interaction.response.send_message("❌ Permissions insuffisantes.", ephemeral=True)
             return
 
