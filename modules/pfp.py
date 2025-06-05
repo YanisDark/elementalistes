@@ -107,10 +107,15 @@ class ProfilePicture(commands.Cog):
             else:
                 await self.rate_limiter.safe_send(ctx.channel, embeds=embeds)
                 
+        except commands.CommandOnCooldown:
+            # Don't handle cooldown here, let the error handler deal with it
+            raise
+            
         except discord.HTTPException as e:
-            error_msg = "❌ Erreur lors de la récupération du profil (limite de débit atteinte)."
             if e.status == 429:
                 error_msg = "⏰ Trop de requêtes, veuillez patienter quelques secondes."
+            else:
+                error_msg = "❌ Erreur lors de la récupération du profil."
             await self._send_error(ctx, error_msg, is_slash)
             
         except discord.NotFound:
@@ -121,8 +126,8 @@ class ProfilePicture(commands.Cog):
             error_msg = "❌ Permissions insuffisantes pour récupérer ce profil."
             await self._send_error(ctx, error_msg, is_slash)
             
-        except Exception as e:
-            error_msg = "❌ Erreur inattendue lors de la récupération du profil."
+        except asyncio.TimeoutError:
+            error_msg = "⏰ Délai d'attente dépassé, réessayez plus tard."
             await self._send_error(ctx, error_msg, is_slash)
 
     async def _send_error(self, ctx, message: str, is_slash: bool):
@@ -146,8 +151,6 @@ class ProfilePicture(commands.Cog):
             await ctx.send(f"⏰ Commande en cooldown ! Réessayez dans {retry_after} seconde{'s' if retry_after > 1 else ''}.", delete_after=5)
         elif isinstance(error, commands.MissingPermissions):
             await ctx.send("❌ Vous n'avez pas les permissions nécessaires.", delete_after=5)
-        else:
-            await ctx.send("❌ Une erreur est survenue.", delete_after=5)
 
 async def setup(bot):
     await bot.add_cog(ProfilePicture(bot))
