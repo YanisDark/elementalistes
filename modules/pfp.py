@@ -7,68 +7,48 @@ class ProfilePicture(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="pfp", description="Affiche la photo de profil et la bannière d'un utilisateur")
-    @app_commands.describe(utilisateur="L'utilisateur dont vous voulez voir la photo de profil")
     async def slash_pfp(self, interaction: discord.Interaction, utilisateur: discord.Member = None):
-        if utilisateur is None:
-            utilisateur = interaction.user
-        await self._send_profile(interaction, utilisateur, is_slash=True)
+        await self._send_profile(interaction, utilisateur or interaction.user, True)
 
-    @app_commands.command(name="pdp", description="Affiche la photo de profil et la bannière d'un utilisateur")
-    @app_commands.describe(utilisateur="L'utilisateur dont vous voulez voir la photo de profil")
+    @app_commands.command(name="pdp", description="Affiche la photo de profil et la bannière d'un utilisateur") 
     async def slash_pdp(self, interaction: discord.Interaction, utilisateur: discord.Member = None):
-        if utilisateur is None:
-            utilisateur = interaction.user
-        await self._send_profile(interaction, utilisateur, is_slash=True)
+        await self._send_profile(interaction, utilisateur or interaction.user, True)
 
     @commands.command(name="pfp", aliases=["pdp"])
     async def text_pfp(self, ctx, utilisateur: discord.Member = None):
-        if utilisateur is None:
-            utilisateur = ctx.author
-        await self._send_profile(ctx, utilisateur, is_slash=False)
+        await self._send_profile(ctx, utilisateur or ctx.author, False)
 
-    async def _send_profile(self, ctx_or_interaction, utilisateur: discord.Member, is_slash: bool):
+    async def _send_profile(self, ctx, utilisateur: discord.Member, is_slash: bool):
         try:
-            # Fetch user to get banner info
             user = await self.bot.fetch_user(utilisateur.id)
+            embeds = []
             
-            embed = discord.Embed(
-                title=f"Profil de {utilisateur.display_name}",
-                color=utilisateur.color if utilisateur.color != discord.Color.default() else discord.Color.blue()
-            )
+            # Global avatar
+            embeds.append(discord.Embed(title=f"Avatar de {utilisateur.display_name}").set_image(url=user.avatar.url if user.avatar else user.default_avatar.url))
             
-            # Add avatar
-            avatar_url = utilisateur.display_avatar.url
-            embed.set_image(url=avatar_url)
-            embed.add_field(name="📸 Photo de profil", value=f"[Lien direct]({avatar_url})", inline=False)
+            # Server avatar if different
+            if utilisateur.guild_avatar and (not user.avatar or utilisateur.guild_avatar.url != user.avatar.url):
+                embeds.append(discord.Embed(title=f"Avatar serveur de {utilisateur.display_name}").set_image(url=utilisateur.guild_avatar.url))
             
-            embeds = [embed]
-            
-            # Add banner if exists
+            # Global banner if exists
             if user.banner:
-                banner_url = user.banner.url
-                embed.add_field(name="🎨 Bannière", value=f"[Lien direct]({banner_url})", inline=False)
-                
-                # Create second embed for banner
-                banner_embed = discord.Embed(
-                    title=f"Bannière de {utilisateur.display_name}",
-                    color=utilisateur.color if utilisateur.color != discord.Color.default() else discord.Color.blue()
-                )
-                banner_embed.set_image(url=banner_url)
-                embeds.append(banner_embed)
-            else:
-                embed.add_field(name="🎨 Bannière", value="Aucune bannière définie", inline=False)
+                embeds.append(discord.Embed(title=f"Bannière de {utilisateur.display_name}").set_image(url=user.banner.url))
+            
+            # Server banner if different
+            if hasattr(utilisateur, 'guild_banner') and utilisateur.guild_banner and (not user.banner or utilisateur.guild_banner.url != user.banner.url):
+                embeds.append(discord.Embed(title=f"Bannière serveur de {utilisateur.display_name}").set_image(url=utilisateur.guild_banner.url))
             
             if is_slash:
-                await ctx_or_interaction.response.send_message(embeds=embeds)
+                await ctx.response.send_message(embeds=embeds)
             else:
-                await ctx_or_interaction.send(embeds=embeds)
+                await ctx.send(embeds=embeds)
                 
-        except Exception as e:
+        except Exception:
             error_msg = "❌ Erreur lors de la récupération du profil."
             if is_slash:
-                await ctx_or_interaction.response.send_message(error_msg, ephemeral=True)
+                await ctx.response.send_message(error_msg, ephemeral=True)
             else:
-                await ctx_or_interaction.send(error_msg)
+                await ctx.send(error_msg)
 
 async def setup(bot):
     await bot.add_cog(ProfilePicture(bot))
