@@ -53,7 +53,7 @@ class RankManagement(commands.Cog):
             }
         }
         
-    def has_permission(self, member, target_rank):
+    def has_permission(self, member, target_rank, target_user=None):
         """Check if member has permission to set the target rank"""
         if member.guild_permissions.administrator:
             return True
@@ -68,21 +68,28 @@ class RankManagement(commands.Cog):
         if self.gerant_staff_role_id and self.gerant_staff_role_id in member_roles:
             return True
             
-        # Seigneurs (assuming this is admin role) can manage Invocateur
-        if self.admin_role_id in member_roles and target_rank == "invocateur":
-            return True
-            
-        # Moderators can only manage Oracle and Membre
-        if self.moderator_role_id in member_roles and target_rank in ["oracle", "membre"]:
-            return True
+        # Moderators permissions
+        if self.moderator_role_id in member_roles:
+            # Can manage Oracle and Membre
+            if target_rank in ["oracle", "membre"]:
+                return True
+            # Can derank Invocateur to Membre only
+            if target_rank == "membre" and target_user:
+                target_roles = [role.id for role in target_user.roles]
+                if self.animator_role_id in target_roles:
+                    return True
             
         return False
     
     async def remove_all_rank_roles(self, user):
-        """Remove all rank roles from user"""
+        """Remove all rank roles from user except Member role"""
         roles_to_remove = []
         
-        for rank_data in self.ranks.values():
+        for rank_key, rank_data in self.ranks.items():
+            # Never remove Member role
+            if rank_key == "membre":
+                continue
+                
             role = user.guild.get_role(rank_data["role_id"])
             if role and role in user.roles:
                 roles_to_remove.append(role)
@@ -102,7 +109,7 @@ class RankManagement(commands.Cog):
         app_commands.Choice(name="Invocateur", value="invocateur")
     ])
     async def rank(self, interaction: discord.Interaction, user: discord.Member, rank: str):
-        if not self.has_permission(interaction.user, rank):
+        if not self.has_permission(interaction.user, rank, user):
             await interaction.response.send_message("❌ Vous n'avez pas la permission de définir ce rang.", ephemeral=True)
             return
         
@@ -113,6 +120,7 @@ class RankManagement(commands.Cog):
         guild = interaction.guild
         target_rank_data = self.ranks[rank]
         target_role = guild.get_role(target_rank_data["role_id"])
+        member_role = guild.get_role(self.member_role_id)
         
         if not target_role:
             await interaction.response.send_message("❌ Le rôle spécifié n'existe pas sur ce serveur.", ephemeral=True)
@@ -124,11 +132,16 @@ class RankManagement(commands.Cog):
             return
         
         try:
-            # Remove all current rank roles
+            # Remove all current rank roles except Member
             await self.remove_all_rank_roles(user)
             
-            # Add new rank role
-            await user.add_roles(target_role, reason=f"Rang défini par {interaction.user}")
+            # Ensure user has Member role
+            if member_role and member_role not in user.roles:
+                await user.add_roles(member_role, reason="Attribution du rôle Membre de base")
+            
+            # Add new rank role (only if not Member, since Member should already be there)
+            if rank != "membre":
+                await user.add_roles(target_role, reason=f"Rang défini par {interaction.user}")
             
             # Handle special cases for Oracle (add conseil role if available)
             if rank == "oracle" and self.conseil_role_id:

@@ -37,36 +37,20 @@ class ModerationCog(commands.Cog):
             await db.commit()
     
     async def send_moderation_feedback(self, interaction: discord.Interaction, message: str):
-        """Send moderation feedback to COMMANDES_CHANNEL_ID and handle ephemeral messages"""
+        """Send moderation feedback to COMMANDES_CHANNEL_ID and ephemeral message to command executor"""
         commandes_channel_id = os.getenv('COMMANDES_CHANNEL_ID')
         
-        if not commandes_channel_id or commandes_channel_id.startswith('commandes_channel_id'):
-            # Fallback to normal behavior if channel not configured
-            if hasattr(interaction, 'followup') and interaction.response.is_done():
-                await interaction.followup.send(message)
-            else:
-                await interaction.response.send_message(message)
-            return
+        # Always send ephemeral message to the command executor first
+        if hasattr(interaction, 'followup') and interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
         
-        commandes_channel = self.bot.get_channel(int(commandes_channel_id))
-        if not commandes_channel:
-            # Fallback if channel not found
-            if hasattr(interaction, 'followup') and interaction.response.is_done():
-                await interaction.followup.send(message)
-            else:
-                await interaction.response.send_message(message)
-            return
-        
-        # Send feedback to commandes channel
-        await commandes_channel.send(message)
-        
-        # If command was executed outside of commandes channel, send ephemeral message
-        if interaction.channel.id != int(commandes_channel_id):
-            ephemeral_message = f"✅ Commande exécutée avec succès. Détails dans {commandes_channel.mention}"
-            if hasattr(interaction, 'followup') and interaction.response.is_done():
-                await interaction.followup.send(ephemeral_message, ephemeral=True)
-            else:
-                await interaction.response.send_message(ephemeral_message, ephemeral=True)
+        # Send to commandes channel if configured
+        if commandes_channel_id and not commandes_channel_id.startswith('commandes_channel_id'):
+            commandes_channel = self.bot.get_channel(int(commandes_channel_id))
+            if commandes_channel:
+                await commandes_channel.send(message)
     
     async def add_sanction(self, user_id, moderator_id, guild_id, sanction_type, reason, duration=None):
         expires_at = None
@@ -357,7 +341,7 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Impossible d'avertir un bot.", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         
         # Add to database first to get the new count
         sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "warn", reason)
@@ -412,7 +396,7 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Impossible de mettre en timeout un bot.", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         
         end_time = datetime.now() + timedelta(seconds=duration_seconds)
         
@@ -461,7 +445,7 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Impossible de mettre en timeout un bot.", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         
         end_time = datetime.now() + timedelta(seconds=duration_seconds)
         
@@ -505,7 +489,7 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Impossible de bannir un bot.", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         
         # Send DM before applying punishment
         await self.send_dm_notification(user, "ban", reason)
@@ -561,7 +545,7 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Impossible d'expulser un bot.", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         
         # Send DM before applying punishment
         await self.send_dm_notification(user, "kick", reason)
@@ -670,7 +654,7 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         
         # Extract message IDs
         start_id = self.extract_message_id_from_link(debut)
@@ -765,7 +749,7 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ Impossible de supprimer plus de 100 messages à la fois.", ephemeral=True)
             return
         
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         
         # Check for 14-day limit
         fourteen_days_ago = discord.utils.utcnow() - timedelta(days=14)
@@ -819,7 +803,7 @@ class ModerationCog(commands.Cog):
         
         sanctions = await self.get_user_sanctions(user.id, interaction.guild.id, active_only=False)
         view = SanctionsView(sanctions, user)
-        await interaction.response.send_message(embed=view.get_embed(), view=view)
+        await interaction.response.send_message(embed=view.get_embed(), view=view, ephemeral=True)
     
     @discord.app_commands.command(name="remove_sanction", description="Supprimer une sanction par son ID")
     @discord.app_commands.describe(
