@@ -39,6 +39,24 @@ class LoveCalc(commands.Cog):
         combined = f"{sorted_ids[0]}-{sorted_ids[1]}"
         return hashlib.md5(combined.encode()).hexdigest()
     
+    async def get_calculated_users(self, user_id: int) -> List[int]:
+        """Get list of user IDs that this user has already calculated love with"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                SELECT user1_id, user2_id FROM love_results 
+                WHERE (user1_id = ? OR user2_id = ?)
+            """, (user_id, user_id))
+            results = await cursor.fetchall()
+            
+            calculated_users = set()
+            for user1_id, user2_id in results:
+                if user1_id == user_id:
+                    calculated_users.add(user2_id)
+                else:
+                    calculated_users.add(user1_id)
+            
+            return list(calculated_users)
+    
     async def get_or_calculate_love(self, user1_id: int, user2_id: int) -> int:
         """Get existing love percentage or calculate new one"""
         user_hash = self.generate_user_hash(user1_id, user2_id)
@@ -201,10 +219,20 @@ class LoveCalc(commands.Cog):
         bypass_role_id = 1345472879168323625
         return any(role.id == bypass_role_id for role in user.roles)
     
-    def get_random_member(self, ctx, exclude_user: discord.Member) -> Optional[discord.Member]:
-        """Get a random member from the server, excluding the specified user"""
-        members = [member for member in ctx.guild.members if not member.bot and member.id != exclude_user.id]
-        return random.choice(members) if members else None
+    async def get_random_member(self, ctx, exclude_user: discord.Member) -> Optional[discord.Member]:
+        """Get a random member from the server, excluding already calculated users"""
+        # Get all users this user has already calculated love with
+        calculated_users = await self.get_calculated_users(exclude_user.id)
+        
+        # Get all members, excluding bots, the user themselves, and already calculated users
+        available_members = [
+            member for member in ctx.guild.members 
+            if not member.bot 
+            and member.id != exclude_user.id 
+            and member.id not in calculated_users
+        ]
+        
+        return random.choice(available_members) if available_members else None
     
     async def safe_delete_after_delay(self, message: discord.Message, delay: float):
         """Safely delete a message after a delay"""
@@ -247,11 +275,11 @@ class LoveCalc(commands.Cog):
         
         # Handle random parameter
         if args_list and args_list[0].lower() == "random":
-            random_member = self.get_random_member(ctx, ctx.author)
+            random_member = await self.get_random_member(ctx, ctx.author)
             if not random_member:
                 await self.rate_limiter.safe_send(
                     ctx.channel,
-                    "❌ Aucun membre disponible pour un calcul aléatoire !"
+                    "❌ Tu as déjà calculé ton amour avec tous les membres disponibles du serveur !"
                 )
                 return
             
@@ -549,20 +577,42 @@ class LoveCalc(commands.Cog):
         if isinstance(error, commands.CommandOnCooldown):
             if self.has_bypass_role(ctx.author):
                 await ctx.reinvoke()
-                return
-            
-            try:
-                error_msg = await self.rate_limiter.safe_send(
-                    ctx.channel,
-                    f"⏰ {ctx.author.mention}, tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !"
-                )
-                
-                if error_msg:
-                    self.error_messages[error_msg.id] = error_msg
-                    asyncio.create_task(self.safe_delete_after_delay(error_msg, error.retry_after))
+            else:
+                try:
+                    error_msg = await self.rate_limiter.safe_send(
+                        ctx.channel,
+                        f"⏰ {ctx.author.mention}, tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !"
+                    )
                     
+                    if error_msg:
+                        self.error_messages[error_msg.id] = error_msg
+                        asyncio.create_task(self.safe_delete_after_delay(error_msg, error.retry_after))
+                        
+                except Exception:
+                    pass
+            # Mark error as handled to prevent global error handler
+            error.__cause__ = None
+            return
+        elif isinstance(error, commands.MemberNotFound):
+            try:
+                await self.rate_limiter.safe_send(
+                    ctx.channel,
+                    "❌ Impossible de trouver ce membre !"
+                )
             except Exception:
                 pass
+            error.__cause__ = None
+            return
+        elif isinstance(error, commands.BadArgument):
+            try:
+                await self.rate_limiter.safe_send(
+                    ctx.channel,
+                    "❌ Argument invalide fourni !"
+                )
+            except Exception:
+                pass
+            error.__cause__ = None
+            return
         else:
             try:
                 await self.rate_limiter.safe_send(
@@ -571,26 +621,29 @@ class LoveCalc(commands.Cog):
                 )
             except Exception:
                 pass
+            error.__cause__ = None
     
     @lovelist_prefix.error
     async def lovelist_prefix_error(self, ctx, error):
         if isinstance(error, commands.CommandOnCooldown):
             if self.has_bypass_role(ctx.author):
                 await ctx.reinvoke()
-                return
-            
-            try:
-                error_msg = await self.rate_limiter.safe_send(
-                    ctx.channel,
-                    f"⏰ {ctx.author.mention}, tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !"
-                )
-                
-                if error_msg:
-                    self.error_messages[error_msg.id] = error_msg
-                    asyncio.create_task(self.safe_delete_after_delay(error_msg, error.retry_after))
+            else:
+                try:
+                    error_msg = await self.rate_limiter.safe_send(
+                        ctx.channel,
+                        f"⏰ {ctx.author.mention}, tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !"
+                    )
                     
-            except Exception:
-                pass
+                    if error_msg:
+                        self.error_messages[error_msg.id] = error_msg
+                        asyncio.create_task(self.safe_delete_after_delay(error_msg, error.retry_after))
+                        
+                except Exception:
+                    pass
+            # Mark error as handled to prevent global error handler
+            error.__cause__ = None
+            return
         else:
             try:
                 await self.rate_limiter.safe_send(
@@ -599,26 +652,28 @@ class LoveCalc(commands.Cog):
                 )
             except Exception:
                 pass
+            error.__cause__ = None
     
     @lovecalc_slash.error
     async def lovecalc_slash_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
         if isinstance(error, discord.app_commands.CommandOnCooldown):
-            if self.has_bypass_role(interaction.user):
-                return
-            
-            try:
-                await interaction.response.send_message(
-                    f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !",
-                    ephemeral=True
-                )
-            except discord.InteractionResponded:
+            if not self.has_bypass_role(interaction.user):
                 try:
-                    await interaction.followup.send(
-                        f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !",
-                        ephemeral=True
-                    )
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message(
+                            f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !",
+                            ephemeral=True
+                        )
+                    else:
+                        await interaction.followup.send(
+                            f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !",
+                            ephemeral=True
+                        )
                 except Exception:
                     pass
+            # Mark error as handled to prevent global error handler
+            error.__cause__ = None
+            return
         else:
             try:
                 if not interaction.response.is_done():
@@ -633,26 +688,28 @@ class LoveCalc(commands.Cog):
                     )
             except Exception:
                 pass
+            error.__cause__ = None
     
     @lovelist_slash.error
     async def lovelist_slash_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
         if isinstance(error, discord.app_commands.CommandOnCooldown):
-            if self.has_bypass_role(interaction.user):
-                return
-            
-            try:
-                await interaction.response.send_message(
-                    f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !",
-                    ephemeral=True
-                )
-            except discord.InteractionResponded:
+            if not self.has_bypass_role(interaction.user):
                 try:
-                    await interaction.followup.send(
-                        f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !",
-                        ephemeral=True
-                    )
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message(
+                            f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !",
+                            ephemeral=True
+                        )
+                    else:
+                        await interaction.followup.send(
+                            f"⏰ Tu dois attendre {error.retry_after:.1f} secondes avant d'utiliser cette commande à nouveau !",
+                            ephemeral=True
+                        )
                 except Exception:
                     pass
+            # Mark error as handled to prevent global error handler
+            error.__cause__ = None
+            return
         else:
             try:
                 if not interaction.response.is_done():
@@ -667,6 +724,7 @@ class LoveCalc(commands.Cog):
                     )
             except Exception:
                 pass
+            error.__cause__ = None
     
     @commands.Cog.listener()
     async def on_ready(self):
