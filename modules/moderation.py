@@ -36,6 +36,38 @@ class ModerationCog(commands.Cog):
             """)
             await db.commit()
     
+    async def send_moderation_feedback(self, interaction: discord.Interaction, message: str):
+        """Send moderation feedback to COMMANDES_CHANNEL_ID and handle ephemeral messages"""
+        commandes_channel_id = os.getenv('COMMANDES_CHANNEL_ID')
+        
+        if not commandes_channel_id or commandes_channel_id.startswith('commandes_channel_id'):
+            # Fallback to normal behavior if channel not configured
+            if hasattr(interaction, 'followup') and interaction.response.is_done():
+                await interaction.followup.send(message)
+            else:
+                await interaction.response.send_message(message)
+            return
+        
+        commandes_channel = self.bot.get_channel(int(commandes_channel_id))
+        if not commandes_channel:
+            # Fallback if channel not found
+            if hasattr(interaction, 'followup') and interaction.response.is_done():
+                await interaction.followup.send(message)
+            else:
+                await interaction.response.send_message(message)
+            return
+        
+        # Send feedback to commandes channel
+        await commandes_channel.send(message)
+        
+        # If command was executed outside of commandes channel, send ephemeral message
+        if interaction.channel.id != int(commandes_channel_id):
+            ephemeral_message = f"✅ Commande exécutée avec succès. Détails dans {commandes_channel.mention}"
+            if hasattr(interaction, 'followup') and interaction.response.is_done():
+                await interaction.followup.send(ephemeral_message, ephemeral=True)
+            else:
+                await interaction.response.send_message(ephemeral_message, ephemeral=True)
+    
     async def add_sanction(self, user_id, moderator_id, guild_id, sanction_type, reason, duration=None):
         expires_at = None
         if duration:
@@ -341,11 +373,11 @@ class ModerationCog(commands.Cog):
             try:
                 await self.rate_limiter.safe_ban(interaction.guild, user, reason=f"3 avertissements atteints - Dernier avertissement: {reason}")
                 await self.add_sanction(user.id, self.bot.user.id, interaction.guild.id, "ban", "3 avertissements atteints")
-                await interaction.followup.send(f"⚠️ {user.mention} a été averti pour **{reason}** (ID: {sanction_id}) et **banni automatiquement** pour avoir atteint 3 avertissements.")
+                await self.send_moderation_feedback(interaction, f"⚠️ {user.mention} a été averti pour **{reason}** (ID: {sanction_id}) et **banni automatiquement** pour avoir atteint 3 avertissements.")
             except discord.Forbidden:
-                await interaction.followup.send(f"⚠️ {user.mention} a été averti pour **{reason}** (ID: {sanction_id}) mais je n'ai pas pu le bannir automatiquement.")
+                await self.send_moderation_feedback(interaction, f"⚠️ {user.mention} a été averti pour **{reason}** (ID: {sanction_id}) mais je n'ai pas pu le bannir automatiquement.")
         else:
-            await interaction.followup.send(f"⚠️ {user.mention} a été averti pour **{reason}** (ID: {sanction_id}). **{warn_count}/3 avertissements actifs**.")
+            await self.send_moderation_feedback(interaction, f"⚠️ {user.mention} a été averti pour **{reason}** (ID: {sanction_id}). **{warn_count}/3 avertissements actifs**.")
     
     @discord.app_commands.command(name="mute", description="Mettre en timeout un utilisateur")
     @discord.app_commands.describe(
@@ -392,9 +424,9 @@ class ModerationCog(commands.Cog):
             timeout_until = discord.utils.utcnow() + timedelta(seconds=duration_seconds)
             await self.rate_limiter.safe_member_edit(user, timed_out_until=timeout_until, reason=reason)
             sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "mute", reason, duration_seconds)
-            await interaction.followup.send(f"🔇 {user.mention} a été mis en timeout pour {self.format_duration(duration_seconds)} pour **{reason}** (ID: {sanction_id}).")
+            await self.send_moderation_feedback(interaction, f"🔇 {user.mention} a été mis en timeout pour {self.format_duration(duration_seconds)} pour **{reason}** (ID: {sanction_id}).")
         except discord.Forbidden:
-            await interaction.followup.send("❌ Je n'ai pas la permission de mettre cet utilisateur en timeout.")
+            await self.send_moderation_feedback(interaction, "❌ Je n'ai pas la permission de mettre cet utilisateur en timeout.")
     
     @discord.app_commands.command(name="timeout", description="Mettre en timeout un utilisateur")
     @discord.app_commands.describe(
@@ -441,9 +473,9 @@ class ModerationCog(commands.Cog):
             timeout_until = discord.utils.utcnow() + timedelta(seconds=duration_seconds)
             await self.rate_limiter.safe_member_edit(user, timed_out_until=timeout_until, reason=reason)
             sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "timeout", reason, duration_seconds)
-            await interaction.followup.send(f"🔇 {user.mention} a été mis en timeout pour {self.format_duration(duration_seconds)} pour **{reason}** (ID: {sanction_id}).")
+            await self.send_moderation_feedback(interaction, f"🔇 {user.mention} a été mis en timeout pour {self.format_duration(duration_seconds)} pour **{reason}** (ID: {sanction_id}).")
         except discord.Forbidden:
-            await interaction.followup.send("❌ Je n'ai pas la permission de mettre cet utilisateur en timeout.")
+            await self.send_moderation_feedback(interaction, "❌ Je n'ai pas la permission de mettre cet utilisateur en timeout.")
     
     @discord.app_commands.command(name="ban", description="Bannir définitivement un utilisateur")
     @discord.app_commands.describe(
@@ -481,11 +513,11 @@ class ModerationCog(commands.Cog):
         try:
             await self.rate_limiter.safe_ban(interaction.guild, user, reason=reason)
             sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "ban", reason)
-            await interaction.followup.send(f"🔨 {user.mention} a été banni définitivement pour **{reason}** (ID: {sanction_id}).")
+            await self.send_moderation_feedback(interaction, f"🔨 {user.mention} a été banni définitivement pour **{reason}** (ID: {sanction_id}).")
         except discord.Forbidden:
-            await interaction.followup.send("❌ Je n'ai pas la permission de bannir cet utilisateur.")
+            await self.send_moderation_feedback(interaction, "❌ Je n'ai pas la permission de bannir cet utilisateur.")
         except discord.NotFound:
-            await interaction.followup.send("❌ Utilisateur non trouvé.")
+            await self.send_moderation_feedback(interaction, "❌ Utilisateur non trouvé.")
     
     @discord.app_commands.command(name="kick", description="Expulser un utilisateur")
     @discord.app_commands.describe(
@@ -495,12 +527,27 @@ class ModerationCog(commands.Cog):
     async def kick_slash(self, interaction: discord.Interaction, user: discord.Member, reason: str):
         admin_role = os.getenv('ADMIN_ROLE_ID')
         moderator_role = os.getenv('MODERATOR_ROLE_ID')
+        oracle_role = os.getenv('ORACLE_ROLE_ID')
+        animator_role = os.getenv('ANIMATOR_ROLE_ID')
+        mineur_role = os.getenv('MINEUR_ROLE_ID')
         
+        # Check if user has mineur role
+        user_roles = [role.id for role in user.roles]
+        has_mineur_role = mineur_role and mineur_role != 'your_mineur_role_id' and int(mineur_role) in user_roles
+        
+        # Build required roles list
         required_roles = []
         if admin_role and admin_role != 'your_admin_role_id':
             required_roles.append(int(admin_role))
         if moderator_role and moderator_role != 'your_moderator_role_id':
             required_roles.append(int(moderator_role))
+        
+        # Allow Oracle and Animator roles only if target has MINEUR_ROLE_ID
+        if has_mineur_role:
+            if oracle_role and oracle_role != 'your_oracle_role_id':
+                required_roles.append(int(oracle_role))
+            if animator_role and animator_role != 'your_animator_role_id':
+                required_roles.append(int(animator_role))
         
         if not self.has_permission(interaction.user, required_roles):
             await interaction.response.send_message("❌ Vous n'avez pas la permission d'utiliser cette commande.", ephemeral=True)
@@ -522,9 +569,9 @@ class ModerationCog(commands.Cog):
         try:
             await self.rate_limiter.safe_kick(user, reason=reason)
             sanction_id = await self.add_sanction(user.id, interaction.user.id, interaction.guild.id, "kick", reason)
-            await interaction.followup.send(f"👋 {user.mention} a été expulsé pour **{reason}** (ID: {sanction_id}).")
+            await self.send_moderation_feedback(interaction, f"👋 {user.mention} a été expulsé pour **{reason}** (ID: {sanction_id}).")
         except discord.Forbidden:
-            await interaction.followup.send("❌ Je n'ai pas la permission d'expulser cet utilisateur.")
+            await self.send_moderation_feedback(interaction, "❌ Je n'ai pas la permission d'expulser cet utilisateur.")
     
     @discord.app_commands.command(name="unmute", description="Lever le timeout d'un utilisateur")
     @discord.app_commands.describe(
@@ -547,9 +594,9 @@ class ModerationCog(commands.Cog):
         try:
             await self.rate_limiter.safe_member_edit(user, timed_out_until=None, reason=f"Timeout levé par {interaction.user}")
             await self.send_dm_notification(user, "unmute", is_lifted=True)
-            await interaction.response.send_message(f"🔊 {user.mention} n'est plus en timeout.")
+            await self.send_moderation_feedback(interaction, f"🔊 {user.mention} n'est plus en timeout.")
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Je n'ai pas la permission de lever le timeout de cet utilisateur.")
+            await self.send_moderation_feedback(interaction, "❌ Je n'ai pas la permission de lever le timeout de cet utilisateur.")
     
     @discord.app_commands.command(name="untimeout", description="Lever le timeout d'un utilisateur")
     @discord.app_commands.describe(
@@ -572,9 +619,9 @@ class ModerationCog(commands.Cog):
         try:
             await self.rate_limiter.safe_member_edit(user, timed_out_until=None, reason=f"Timeout levé par {interaction.user}")
             await self.send_dm_notification(user, "untimeout", is_lifted=True)
-            await interaction.response.send_message(f"🔊 {user.mention} n'est plus en timeout.")
+            await self.send_moderation_feedback(interaction, f"🔊 {user.mention} n'est plus en timeout.")
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Je n'ai pas la permission de lever le timeout de cet utilisateur.")
+            await self.send_moderation_feedback(interaction, "❌ Je n'ai pas la permission de lever le timeout de cet utilisateur.")
     
     @discord.app_commands.command(name="unban", description="Débannir un utilisateur")
     @discord.app_commands.describe(
@@ -596,13 +643,13 @@ class ModerationCog(commands.Cog):
             user = await self.bot.fetch_user(user_id_int)
             await self.rate_limiter.safe_unban(interaction.guild, user)
             await self.send_dm_notification(user, "unban", is_lifted=True)
-            await interaction.response.send_message(f"✅ {user.mention} a été débanni.")
+            await self.send_moderation_feedback(interaction, f"✅ {user.mention} a été débanni.")
         except ValueError:
-            await interaction.response.send_message("❌ ID utilisateur invalide.")
+            await self.send_moderation_feedback(interaction, "❌ ID utilisateur invalide.")
         except discord.NotFound:
-            await interaction.response.send_message("❌ Utilisateur non trouvé ou non banni.")
+            await self.send_moderation_feedback(interaction, "❌ Utilisateur non trouvé ou non banni.")
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Je n'ai pas la permission de débannir cet utilisateur.")
+            await self.send_moderation_feedback(interaction, "❌ Je n'ai pas la permission de débannir cet utilisateur.")
 
     @discord.app_commands.command(name="clear_conversation", description="Supprimer les messages entre deux messages spécifiés")
     @discord.app_commands.describe(
@@ -631,7 +678,7 @@ class ModerationCog(commands.Cog):
             try:
                 start_id = int(debut)
             except ValueError:
-                await interaction.followup.send("❌ Format du message de début invalide.")
+                await self.send_moderation_feedback(interaction, "❌ Format du message de début invalide.")
                 return
         
         end_id = self.extract_message_id_from_link(fin)
@@ -639,7 +686,7 @@ class ModerationCog(commands.Cog):
             try:
                 end_id = int(fin)
             except ValueError:
-                await interaction.followup.send("❌ Format du message de fin invalide.")
+                await self.send_moderation_feedback(interaction, "❌ Format du message de fin invalide.")
                 return
         
         # Ensure start_id is smaller than end_id
@@ -654,7 +701,7 @@ class ModerationCog(commands.Cog):
             # Check if messages are older than 14 days
             fourteen_days_ago = discord.utils.utcnow() - timedelta(days=14)
             if start_message.created_at < fourteen_days_ago or end_message.created_at < fourteen_days_ago:
-                await interaction.followup.send("❌ Impossible de supprimer des messages plus anciens que 14 jours.")
+                await self.send_moderation_feedback(interaction, "❌ Impossible de supprimer des messages plus anciens que 14 jours.")
                 return
             
             # Collect messages to delete
@@ -666,11 +713,11 @@ class ModerationCog(commands.Cog):
                     messages_to_delete.append(message)
             
             if len(messages_to_delete) > 100:
-                await interaction.followup.send("❌ Impossible de supprimer plus de 100 messages à la fois.")
+                await self.send_moderation_feedback(interaction, "❌ Impossible de supprimer plus de 100 messages à la fois.")
                 return
             
             if not messages_to_delete:
-                await interaction.followup.send("❌ Aucun message trouvé dans cette plage.")
+                await self.send_moderation_feedback(interaction, "❌ Aucun message trouvé dans cette plage.")
                 return
             
             # Delete messages using rate limiter
@@ -682,15 +729,15 @@ class ModerationCog(commands.Cog):
                 except discord.NotFound:
                     pass  # Message already deleted
                 except discord.Forbidden:
-                    await interaction.followup.send(f"❌ Permission insuffisante pour supprimer certains messages. {deleted_count} messages supprimés.")
+                    await self.send_moderation_feedback(interaction, f"❌ Permission insuffisante pour supprimer certains messages. {deleted_count} messages supprimés.")
                     return
             
-            await interaction.followup.send(f"✅ {deleted_count} messages supprimés avec succès.")
+            await self.send_moderation_feedback(interaction, f"✅ {deleted_count} messages supprimés avec succès.")
             
         except discord.NotFound:
-            await interaction.followup.send("❌ Un ou plusieurs messages n'ont pas été trouvés.")
+            await self.send_moderation_feedback(interaction, "❌ Un ou plusieurs messages n'ont pas été trouvés.")
         except discord.Forbidden:
-            await interaction.followup.send("❌ Permission insuffisante pour accéder aux messages.")
+            await self.send_moderation_feedback(interaction, "❌ Permission insuffisante pour accéder aux messages.")
 
     @discord.app_commands.command(name="mass_clear", description="Supprimer un nombre spécifié de messages récents")
     @discord.app_commands.describe(
@@ -732,7 +779,7 @@ class ModerationCog(commands.Cog):
                 messages_to_delete.append(message)
             
             if not messages_to_delete:
-                await interaction.followup.send("❌ Aucun message récent à supprimer (limite de 14 jours).")
+                await self.send_moderation_feedback(interaction, "❌ Aucun message récent à supprimer (limite de 14 jours).")
                 return
             
             # Delete messages using rate limiter
@@ -744,13 +791,13 @@ class ModerationCog(commands.Cog):
                 except discord.NotFound:
                     pass  # Message already deleted
                 except discord.Forbidden:
-                    await interaction.followup.send(f"❌ Permission insuffisante pour supprimer certains messages. {deleted_count} messages supprimés.")
+                    await self.send_moderation_feedback(interaction, f"❌ Permission insuffisante pour supprimer certains messages. {deleted_count} messages supprimés.")
                     return
             
-            await interaction.followup.send(f"✅ {deleted_count} messages supprimés avec succès.")
+            await self.send_moderation_feedback(interaction, f"✅ {deleted_count} messages supprimés avec succès.")
             
         except discord.Forbidden:
-            await interaction.followup.send("❌ Permission insuffisante pour supprimer les messages.")
+            await self.send_moderation_feedback(interaction, "❌ Permission insuffisante pour supprimer les messages.")
 
     @discord.app_commands.command(name="sanctions", description="Afficher les sanctions d'un utilisateur")
     @discord.app_commands.describe(
@@ -799,7 +846,7 @@ class ModerationCog(commands.Cog):
             return
         
         await self.remove_sanction(sanction_id)
-        await interaction.response.send_message(f"✅ Sanction ID {sanction_id} supprimée pour {user.mention}.")
+        await self.send_moderation_feedback(interaction, f"✅ Sanction ID {sanction_id} supprimée pour {user.mention}.")
 
     @commands.Cog.listener()
     async def on_ready(self):
