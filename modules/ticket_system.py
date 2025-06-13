@@ -523,6 +523,32 @@ async def setup_ticket_system(bot):
     
     channel = bot.get_channel(TICKET_CHANNEL_ID)
     if channel:
+        # Create embed first
+        embed = discord.Embed(
+            title="🎫 Support - Les Élémentalistes",
+            description="**Besoin d'aide ?**\n\nCréez un ticket afin de contacter le staff. Il existe trois types de tickets selon votre situation :",
+            color=discord.Color.blue()
+        )
+        
+        # Signalement section
+        signalement_text = "**Pour signaler :**\n- Un membre qui enfreint les règles\n- Du contenu inapproprié sur le serveur\n- Du harcèlement ou de la toxicité\n- Tout comportement suspect"
+        embed.add_field(name="🚨 Signalement", value=signalement_text, inline=False)
+        
+        # Partenariat section
+        partenariat_text = "**Pour proposer :**\n- Un partenariat avec Les Élémentalistes\n- Une collaboration lors d'un évent\n- Un échange de publicité"
+        embed.add_field(name="🤝 Partenariat", value=partenariat_text, inline=False)
+        
+        # Contestation section
+        contestation_text = "**Pour contester :**\n- Un avertissement/warn reçu\n- Un timeout/mute appliqué\n- Une exclusion du serveur\n- Toute sanction ou comportement staff jugé injuste"
+        embed.add_field(name="⚖️ Contestation de Sanction", value=contestation_text, inline=False)
+        
+        # Important section
+        important_text = "- **Un seul ticket à la fois** par personne\n- **Soyez précis** dans votre demande\n- **Restez patient**, le staff vous répondra dès que possible\n- **Soyez respectueux** envers les membres du staff"
+        embed.add_field(name="ℹ️ Important", value=important_text, inline=False)
+        
+        embed.set_footer(text="Les Élémentalistes • Tickets")
+        view = TicketButtons()
+        
         # Look for existing message
         existing_message = None
         async for message in channel.history(limit=10):
@@ -533,24 +559,15 @@ async def setup_ticket_system(bot):
         
         if existing_message:
             try:
-                view = TicketButtons()
-                await rate_limiter.safe_edit(existing_message, view=view)
+                await rate_limiter.safe_edit(existing_message, embed=embed, view=view)
                 return
             except:
                 await rate_limiter.safe_delete(existing_message)
         
         # Create new message
-        embed = discord.Embed(
-            title="🎫 Système de Tickets - Les Élémentalistes",
-            description="**Besoin d'aide ou avez-vous une demande spécifique ?**\n\nUtilisez notre système de tickets pour contacter le staff de manière privée et organisée.",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="🚨 Signalement", value="Pour signaler un utilisateur ou comportement", inline=True)
-        embed.add_field(name="🤝 Partenariat", value="Pour proposer un partenariat", inline=True)
-        embed.add_field(name="⚖️ Contestation", value="Pour contester une sanction", inline=True)
-        
-        view = TicketButtons()
         await rate_limiter.safe_send(channel, embed=embed, view=view)
+
+
 
 class TicketCog(commands.Cog):
     def __init__(self, bot):
