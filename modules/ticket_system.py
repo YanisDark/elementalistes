@@ -553,7 +553,7 @@ async def setup_ticket_system(bot):
         existing_message = None
         async for message in channel.history(limit=10):
             if message.author == bot.user and message.embeds:
-                if "Système de Tickets" in message.embeds[0].title:
+                if "🎫 Support - Les Élémentalistes" in message.embeds[0].title:
                     existing_message = message
                     break
         

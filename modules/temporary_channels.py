@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import asyncio
 import logging
 import json
+import re
 from .rate_limiter import get_rate_limiter, safe_api_call
 
 load_dotenv()
@@ -195,6 +196,39 @@ class TemporaryChannels(commands.Cog):
         
         return True
     
+    async def get_next_portal_number(self, guild):
+        """Get the next available portal number by checking existing channels"""
+        category = discord.utils.get(guild.categories, id=self.vocal_category_id) if self.vocal_category_id else None
+        
+        if not category:
+            creer_channel = guild.get_channel(self.creer_vocal_id)
+            if creer_channel:
+                category = creer_channel.category
+        
+        if not category:
+            return 1
+        
+        # Find all channels that match the portal pattern
+        portal_numbers = []
+        pattern = r'🌀 Portail #(\d+)'
+        
+        for channel in category.voice_channels:
+            match = re.match(pattern, channel.name)
+            if match:
+                portal_numbers.append(int(match.group(1)))
+        
+        # Find the next available number
+        if not portal_numbers:
+            return 1
+        
+        # Sort and find the first gap, or return max + 1
+        portal_numbers.sort()
+        for i, num in enumerate(portal_numbers, 1):
+            if i != num:
+                return i
+        
+        return max(portal_numbers) + 1
+    
     async def create_temp_channel(self, member):
         guild = member.guild
         category = discord.utils.get(guild.categories, id=self.vocal_category_id) if self.vocal_category_id else None
@@ -208,13 +242,9 @@ class TemporaryChannels(commands.Cog):
             logging.error("No valid category found for temporary channels")
             return
         
-        temp_count = 0
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute('SELECT COUNT(*) FROM temp_channels') as cursor:
-                row = await cursor.fetchone()
-                temp_count = row[0] if row else 0
-        
-        channel_name = f"🌀 Portail #{temp_count + 1}"
+        # Get next available portal number
+        portal_number = await self.get_next_portal_number(guild)
+        channel_name = f"🌀 Portail #{portal_number}"
         
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(connect=True, view_channel=True),
@@ -1178,78 +1208,67 @@ class ClaimOwnershipView(discord.ui.View):
     
     @discord.ui.button(label="👑 Revendiquer la propriété", style=discord.ButtonStyle.primary)
     async def claim_ownership(self, interaction, button):
-        try:
-            await interaction.response.defer(ephemeral=True)
+        # Check if already claimed to prevent race conditions
+        if self.claimed:
+            await interaction.response.send_message("❌ Ce canal a déjà été revendiqué.", ephemeral=True)
+            return
             
-            channel = self.cog.bot.get_channel(self.channel_id)
-            if not channel:
-                await interaction.followup.send("❌ Canal introuvable.", ephemeral=True)
-                return
-            
-            # Check if original owner is back in the channel
-            async with aiosqlite.connect(self.cog.db_path) as db:
-                async with db.execute(
-                    'SELECT original_owner_id FROM temp_channels WHERE channel_id = ?',
-                    (self.channel_id,)
-                ) as cursor:
-                    row = await cursor.fetchone()
-                    if not row:
-                        await interaction.followup.send("❌ Canal temporaire introuvable.", ephemeral=True)
-                        return
-                    original_owner_id = row[0]
-            
-            # Check if original owner is in the channel
-            if original_owner_id:
-                original_owner = channel.guild.get_member(original_owner_id)
-                if original_owner and original_owner in channel.members:
-                    await interaction.followup.send("❌ Le propriétaire original est de retour dans le canal. Vous ne pouvez plus le revendiquer.", ephemeral=True)
-                    
-                    # Update the message to reflect owner return
-                    await self.update_for_owner_return(original_owner)
+        channel = self.cog.bot.get_channel(self.channel_id)
+        if not channel:
+            await interaction.response.send_message("❌ Canal introuvable.", ephemeral=True)
+            return
+        
+        # Check if original owner is back in the channel
+        async with aiosqlite.connect(self.cog.db_path) as db:
+            async with db.execute(
+                'SELECT original_owner_id FROM temp_channels WHERE channel_id = ?',
+                (self.channel_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    await interaction.response.send_message("❌ Canal temporaire introuvable.", ephemeral=True)
                     return
-            
-            if interaction.user not in channel.members:
-                await interaction.followup.send("❌ Vous devez être dans le canal vocal pour le revendiquer.", ephemeral=True)
+                original_owner_id = row[0]
+        
+        # Check if original owner is in the channel
+        if original_owner_id:
+            original_owner = channel.guild.get_member(original_owner_id)
+            if original_owner and original_owner in channel.members:
+                await interaction.response.send_message("❌ Le propriétaire original est de retour dans le canal. Vous ne pouvez plus le revendiquer.", ephemeral=True)
+                
+                # Update the message to reflect owner return
+                await self.update_for_owner_return(original_owner)
                 return
+        
+        if interaction.user not in channel.members:
+            await interaction.response.send_message("❌ Vous devez être dans le canal vocal pour le revendiquer.", ephemeral=True)
+            return
+        
+        # Mark as claimed early to prevent race conditions
+        self.claimed = True
+        
+        success = await self.cog.transfer_ownership_to(channel, interaction.user.id, automatic=False)
+        if success:
+            await interaction.response.send_message(f"🎉 **{interaction.user.display_name}** est maintenant propriétaire du canal !", ephemeral=True)
             
-            success = await self.cog.transfer_ownership_to(channel, interaction.user.id, automatic=False)
-            if success:
-                self.claimed = True  # Mark as claimed
-                await interaction.followup.send(f"🎉 **{interaction.user.display_name}** est maintenant propriétaire du canal !", ephemeral=True)
-                
-                # Send public message to channel
-                embed = discord.Embed(
-                    title="👑 Nouveau Propriétaire",
-                    description=f"**{interaction.user.display_name}** a pris possession du canal !",
-                    color=0x00ff00
-                )
-                try:
-                    await rate_limiter.safe_send(channel, embed=embed)
-                except discord.Forbidden:
-                    pass
-                
-                # Clean up claim system
-                await self.cog.cleanup_claim_system(self.channel_id)
-                
-                self.stop()
-            else:
-                await interaction.followup.send("❌ Erreur lors de la revendication de propriété.", ephemeral=True)
-                
-        except discord.InteractionResponded:
-            # If interaction was already responded to, try with followup
+            # Send public message to channel
+            embed = discord.Embed(
+                title="👑 Nouveau Propriétaire",
+                description=f"**{interaction.user.display_name}** a pris possession du canal !",
+                color=0x00ff00
+            )
             try:
-                await interaction.followup.send("❌ Une erreur s'est produite.", ephemeral=True)
-            except Exception:
+                await rate_limiter.safe_send(channel, embed=embed)
+            except discord.Forbidden:
                 pass
-        except Exception as e:
-            logging.error(f"Error in claim_ownership: {e}")
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("❌ Une erreur s'est produite.", ephemeral=True)
-                else:
-                    await interaction.followup.send("❌ Une erreur s'est produite.", ephemeral=True)
-            except Exception:
-                pass
+            
+            # Clean up claim system
+            await self.cog.cleanup_claim_system(self.channel_id)
+            self.stop()
+        else:
+            # Reset claimed status on failure
+            self.claimed = False
+            await interaction.response.send_message("❌ Erreur lors de la revendication de propriété.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(TemporaryChannels(bot))
