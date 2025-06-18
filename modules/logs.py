@@ -2,26 +2,65 @@
 import discord
 from discord.ext import commands
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import aiohttp
 import aiofiles
 import pytz
+import aiosqlite
 from typing import Optional, Union
 
 class LogsModule(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.logs_channel_id = int(os.getenv('LOGS_STAFF_CHANNEL_ID'))
+        self.admin_role_id = int(os.getenv('ADMIN_ROLE_ID'))
         self.timezone = pytz.timezone('Europe/Paris')
         self.media_folder = "saved_media"
-        self.ensure_media_folder()
+        self.db_path = "data/stealth.db"
+        self.stealth_users = set()
+        self.ensure_folders()
+        asyncio.create_task(self.init_database())
         
-    def ensure_media_folder(self):
-        """Crée le dossier de sauvegarde des médias s'il n'existe pas"""
-        if not os.path.exists(self.media_folder):
-            os.makedirs(self.media_folder)
+    def ensure_folders(self):
+        """Crée les dossiers nécessaires s'ils n'existent pas"""
+        os.makedirs(self.media_folder, exist_ok=True)
+        os.makedirs("data", exist_ok=True)
             
+    async def init_database(self):
+        """Initialise la base de données stealth"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS stealth_users (
+                    user_id INTEGER PRIMARY KEY,
+                    enabled BOOLEAN DEFAULT TRUE
+                )
+            ''')
+            await db.commit()
+            
+            # Charger les utilisateurs stealth
+            async with db.execute('SELECT user_id FROM stealth_users WHERE enabled = TRUE') as cursor:
+                rows = await cursor.fetchall()
+                self.stealth_users = {row[0] for row in rows}
+                
+    async def toggle_stealth(self, user_id: int, enabled: bool):
+        """Active/désactive le mode stealth pour un utilisateur"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT OR REPLACE INTO stealth_users (user_id, enabled) 
+                VALUES (?, ?)
+            ''', (user_id, enabled))
+            await db.commit()
+            
+        if enabled:
+            self.stealth_users.add(user_id)
+        else:
+            self.stealth_users.discard(user_id)
+            
+    def is_stealth(self, user_id: int) -> bool:
+        """Vérifie si un utilisateur est en mode stealth"""
+        return user_id in self.stealth_users
+        
     def get_paris_time(self):
         """Retourne l'heure actuelle en timezone Paris"""
         return datetime.now(self.timezone)
@@ -29,12 +68,10 @@ class LogsModule(commands.Cog):
     async def save_attachment(self, attachment: discord.Attachment, message_id: int, author_id: int) -> str:
         """Sauvegarde un fichier joint et retourne le chemin"""
         try:
-            # Créer un nom de fichier unique
             timestamp = self.get_paris_time().strftime("%Y%m%d_%H%M%S")
             filename = f"{timestamp}_{author_id}_{message_id}_{attachment.filename}"
             filepath = os.path.join(self.media_folder, filename)
             
-            # Télécharger le fichier
             async with aiohttp.ClientSession() as session:
                 async with session.get(attachment.url) as resp:
                     if resp.status == 200:
@@ -71,17 +108,37 @@ class LogsModule(commands.Cog):
         embed.set_footer(text="Les Élémentalistes • Logs", icon_url=self.bot.user.display_avatar.url)
         return embed
 
+    # === COMMANDES ===
+    
+    @discord.app_commands.command(name="stealth", description="Active/désactive le mode stealth pour éviter les logs")
+    @discord.app_commands.describe(mode="Activer ou désactiver le mode stealth")
+    @discord.app_commands.choices(mode=[
+        discord.app_commands.Choice(name="Activer", value="on"),
+        discord.app_commands.Choice(name="Désactiver", value="off")
+    ])
+    async def stealth_command(self, interaction: discord.Interaction, mode: str):
+        # Vérifier si l'utilisateur a le rôle SEIGNEUR (ADMIN)
+        if not any(role.id == self.admin_role_id for role in interaction.user.roles):
+            await interaction.response.send_message("❌ Vous n'avez pas les permissions nécessaires.", ephemeral=True)
+            return
+            
+        enabled = mode == "on"
+        await self.toggle_stealth(interaction.user.id, enabled)
+        
+        status = "activé" if enabled else "désactivé"
+        emoji = "👻" if enabled else "👁️"
+        await interaction.response.send_message(f"{emoji} Mode stealth **{status}** pour vous.", ephemeral=True)
+
     # === ÉVÉNEMENTS DE MESSAGES ===
     
     @commands.Cog.listener()
     async def on_message_delete(self, message):
-        if message.guild is None or message.author.bot:
+        if message.guild is None or message.author.bot or self.is_stealth(message.author.id):
             return
             
         embed = self.create_base_embed("📋 Message Supprimé", discord.Color.red(), message.author)
         embed.add_field(name="📍 Salon", value=f"<#{message.channel.id}>", inline=True)
         
-        # Conversion en timezone Paris
         created_paris = message.created_at.replace(tzinfo=pytz.UTC).astimezone(self.timezone)
         embed.add_field(name="📅 Envoyé le", value=f"<t:{int(created_paris.timestamp())}:F>", inline=True)
         embed.add_field(name="🆔 ID Message", value=message.id, inline=True)
@@ -89,59 +146,105 @@ class LogsModule(commands.Cog):
         content = message.content[:1024] if message.content else "*(Aucun contenu textuel)*"
         embed.add_field(name="💬 Contenu", value=content, inline=False)
         
-        # Sauvegarder les médias
-        saved_files = []
+        # Sauvegarder et gérer les médias
         if message.attachments:
+            saved_files = []
             attachments_info = []
+            
             for att in message.attachments:
                 saved_path = await self.save_attachment(att, message.id, message.author.id)
                 if saved_path:
-                    saved_files.append(saved_path)
+                    saved_files.append((saved_path, att.filename))
                     attachments_info.append(f"• {att.filename} (`{att.size} octets`) - **Sauvegardé**")
                 else:
                     attachments_info.append(f"• {att.filename} (`{att.size} octets`) - *Échec sauvegarde*")
                     
-            embed.add_field(name="📎 Pièces jointes", value="\n".join(attachments_info[:5]), inline=False)
+            embed.add_field(name="📎 Pièces jointes", value="\n".join(attachments_info[:10]), inline=False)
             
-            # Si c'est une image et qu'elle a été sauvegardée, l'attacher au log
-            for saved_file in saved_files:
+            # Envoyer l'embed principal
+            await self.send_log(embed)
+            
+            # Envoyer les images sauvegardées séparément
+            for saved_file, original_name in saved_files:
                 if any(saved_file.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
                     try:
+                        image_embed = discord.Embed(
+                            title="📎 Image du message supprimé",
+                            color=discord.Color.red(),
+                            timestamp=self.get_paris_time()
+                        )
+                        image_embed.add_field(name="📁 Fichier", value=original_name, inline=True)
+                        image_embed.add_field(name="👤 Auteur", value=f"{message.author.mention}", inline=True)
+                        image_embed.set_footer(text="Les Élémentalistes • Logs", icon_url=self.bot.user.display_avatar.url)
+                        
                         file = discord.File(saved_file, filename=os.path.basename(saved_file))
-                        embed.set_image(url=f"attachment://{os.path.basename(saved_file)}")
-                        await self.send_log(embed, file)
-                        return
-                    except:
-                        pass
-            
-        await self.send_log(embed)
+                        image_embed.set_image(url=f"attachment://{os.path.basename(saved_file)}")
+                        await self.send_log(image_embed, file)
+                    except Exception as e:
+                        print(f"Erreur lors de l'envoi de l'image {original_name}: {e}")
+        else:
+            await self.send_log(embed)
 
     @commands.Cog.listener()
     async def on_bulk_message_delete(self, messages):
         if not messages or messages[0].guild is None:
             return
             
+        # Filtrer les messages non-stealth
+        non_stealth_messages = [msg for msg in messages if not self.is_stealth(msg.author.id)]
+        if not non_stealth_messages:
+            return
+            
         embed = self.create_base_embed("🗑️ Suppression en Masse", discord.Color.dark_red())
         embed.add_field(name="📍 Salon", value=f"<#{messages[0].channel.id}>", inline=True)
-        embed.add_field(name="📊 Nombre", value=len(messages), inline=True)
+        embed.add_field(name="📊 Nombre", value=len(non_stealth_messages), inline=True)
         
         current_time = self.get_paris_time()
         embed.add_field(name="📅 Supprimés le", value=f"<t:{int(current_time.timestamp())}:F>", inline=True)
         
-        authors = list(set([msg.author.mention for msg in messages if not msg.author.bot]))[:10]
+        authors = list(set([msg.author.mention for msg in non_stealth_messages if not msg.author.bot]))[:10]
         if authors:
             embed.add_field(name="👥 Auteurs", value="\n".join(authors), inline=False)
             
-        # Compter les médias supprimés
-        total_attachments = sum(len(msg.attachments) for msg in messages)
+        # Compter et sauvegarder les médias
+        total_attachments = 0
+        saved_media = []
+        
+        for msg in non_stealth_messages:
+            for att in msg.attachments:
+                total_attachments += 1
+                saved_path = await self.save_attachment(att, msg.id, msg.author.id)
+                if saved_path:
+                    saved_media.append((saved_path, att.filename, msg.author))
+                    
         if total_attachments > 0:
-            embed.add_field(name="📎 Médias supprimés", value=f"{total_attachments} fichier(s)", inline=False)
+            embed.add_field(name="📎 Médias supprimés", value=f"{total_attachments} fichier(s) - {len(saved_media)} sauvegardé(s)", inline=False)
             
         await self.send_log(embed)
+        
+        # Envoyer les médias sauvegardés
+        for saved_file, original_name, author in saved_media[:5]:  # Limiter à 5 pour éviter le spam
+            if any(saved_file.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']):
+                try:
+                    image_embed = discord.Embed(
+                        title="📎 Média de la suppression en masse",
+                        color=discord.Color.dark_red(),
+                        timestamp=self.get_paris_time()
+                    )
+                    image_embed.add_field(name="📁 Fichier", value=original_name, inline=True)
+                    image_embed.add_field(name="👤 Auteur", value=author.mention, inline=True)
+                    image_embed.set_footer(text="Les Élémentalistes • Logs", icon_url=self.bot.user.display_avatar.url)
+                    
+                    file = discord.File(saved_file, filename=os.path.basename(saved_file))
+                    image_embed.set_image(url=f"attachment://{os.path.basename(saved_file)}")
+                    await self.send_log(image_embed, file)
+                except Exception as e:
+                    print(f"Erreur lors de l'envoi du média {original_name}: {e}")
 
     @commands.Cog.listener()
     async def on_message_edit(self, before, after):
-        if before.guild is None or before.author.bot or before.content == after.content:
+        if (before.guild is None or before.author.bot or 
+            before.content == after.content or self.is_stealth(before.author.id)):
             return
             
         embed = self.create_base_embed("✏️ Message Modifié", discord.Color.orange(), before.author)
@@ -161,6 +264,9 @@ class LogsModule(commands.Cog):
 
     @commands.Cog.listener()
     async def on_invite_create(self, invite):
+        if self.is_stealth(invite.inviter.id if invite.inviter else 0):
+            return
+            
         embed = self.create_base_embed("📨 Invitation Créée", discord.Color.green(), invite.inviter)
         embed.add_field(name="🔗 Code", value=invite.code, inline=True)
         embed.add_field(name="📍 Salon", value=f"<#{invite.channel.id}>", inline=True)
@@ -186,7 +292,6 @@ class LogsModule(commands.Cog):
         embed.add_field(name="🆔 ID", value=member.id, inline=True)
         embed.add_field(name="📊 Membres total", value=member.guild.member_count, inline=True)
         
-        # Calcul de l'âge du compte
         account_age = self.get_paris_time() - created_paris
         if account_age.days < 7:
             embed.add_field(name="⚠️ Attention", value=f"Compte récent ({account_age.days} jour(s))", inline=False)
@@ -204,7 +309,7 @@ class LogsModule(commands.Cog):
         embed.add_field(name="🆔 ID", value=member.id, inline=True)
         embed.add_field(name="📊 Membres restant", value=member.guild.member_count, inline=True)
         
-        if member.roles[1:]:  # Exclure @everyone
+        if member.roles[1:]:
             roles = ", ".join([role.mention for role in member.roles[1:][:10]])
             embed.add_field(name="🎭 Rôles", value=roles, inline=False)
             
@@ -219,7 +324,6 @@ class LogsModule(commands.Cog):
         current_time = self.get_paris_time()
         embed.add_field(name="📅 Banni le", value=f"<t:{int(current_time.timestamp())}:F>", inline=True)
         
-        # Essayer de récupérer la raison du ban
         try:
             ban = await guild.fetch_ban(user)
             if ban.reason:
@@ -242,6 +346,9 @@ class LogsModule(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
+        if self.is_stealth(after.id):
+            return
+            
         # Changement de pseudo
         if before.display_name != after.display_name:
             embed = self.create_base_embed("📝 Pseudo Modifié", discord.Color.blue(), after)
@@ -426,6 +533,9 @@ class LogsModule(commands.Cog):
     
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
+        if self.is_stealth(member.id):
+            return
+            
         # Membre rejoint un vocal
         if before.channel is None and after.channel is not None:
             embed = self.create_base_embed("🔊 Connexion Vocale", discord.Color.green(), member)
@@ -467,6 +577,9 @@ class LogsModule(commands.Cog):
     
     @commands.Cog.listener()
     async def on_thread_create(self, thread):
+        if thread.owner and self.is_stealth(thread.owner.id):
+            return
+            
         embed = self.create_base_embed("🧵 Fil de Discussion Créé", discord.Color.green())
         embed.add_field(name="🏷️ Nom", value=thread.name, inline=True)
         embed.add_field(name="📍 Parent", value=f"<#{thread.parent.id}>", inline=True)

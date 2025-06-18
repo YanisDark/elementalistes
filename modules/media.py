@@ -82,54 +82,55 @@ class MediaModule(commands.Cog):
         if message.channel.id != self.media_channel_id:
             return
         
-        # Exception pour les administrateurs
-        if hasattr(message.author, 'roles'):
-            admin_role = discord.utils.get(message.author.roles, id=self.admin_role_id)
-            if admin_role:
-                return
-        
         # Vérifier si le message contient des attachements
         has_attachment = len(message.attachments) > 0
         
         # Vérifier si le message contient des liens
         has_link = bool(self.url_pattern.search(message.content))
         
-        # Si pas d'attachement ni de lien, supprimer le message
+        # Vérifier si l'utilisateur est administrateur
+        is_admin = False
+        if hasattr(message.author, 'roles'):
+            admin_role = discord.utils.get(message.author.roles, id=self.admin_role_id)
+            is_admin = admin_role is not None
+        
+        # Si pas d'attachement ni de lien, supprimer le message (sauf pour les admins)
         if not has_attachment and not has_link:
-            try:
-                await self.rate_limiter.safe_delete(message)
-                
-                # Envoyer message d'avertissement
-                warning_msg = await self.rate_limiter.safe_send(
-                    message.channel,
-                    f"{message.author.mention}, vous ne pouvez poster que des images, vidéos, liens ou autres fichiers dans ce salon."
-                )
-                
-                if warning_msg:
-                    # Sauvegarder l'ID du message d'avertissement
-                    warning_ids = await self.load_warning_messages()
-                    warning_ids.append(warning_msg.id)
-                    await self.save_warning_messages(warning_ids)
+            if not is_admin:
+                try:
+                    await self.rate_limiter.safe_delete(message)
                     
-                    # Supprimer le message d'avertissement après 30 secondes
-                    await asyncio.sleep(30)
-                    try:
-                        await self.rate_limiter.safe_delete(warning_msg)
-                        # Retirer l'ID de la liste
+                    # Envoyer message d'avertissement
+                    warning_msg = await self.rate_limiter.safe_send(
+                        message.channel,
+                        f"{message.author.mention}, vous ne pouvez poster que des images, vidéos, liens ou autres fichiers dans ce salon."
+                    )
+                    
+                    if warning_msg:
+                        # Sauvegarder l'ID du message d'avertissement
                         warning_ids = await self.load_warning_messages()
-                        if warning_msg.id in warning_ids:
-                            warning_ids.remove(warning_msg.id)
-                            await self.save_warning_messages(warning_ids)
-                    except discord.errors.NotFound:
-                        pass
+                        warning_ids.append(warning_msg.id)
+                        await self.save_warning_messages(warning_ids)
+                        
+                        # Supprimer le message d'avertissement après 30 secondes
+                        await asyncio.sleep(30)
+                        try:
+                            await self.rate_limiter.safe_delete(warning_msg)
+                            # Retirer l'ID de la liste
+                            warning_ids = await self.load_warning_messages()
+                            if warning_msg.id in warning_ids:
+                                warning_ids.remove(warning_msg.id)
+                                await self.save_warning_messages(warning_ids)
+                        except discord.errors.NotFound:
+                            pass
+                        
+                except discord.errors.NotFound:
+                    pass
+                except discord.errors.Forbidden:
+                    pass
                     
-            except discord.errors.NotFound:
-                pass
-            except discord.errors.Forbidden:
-                pass
-                
         else:
-            # Créer un thread public sous le message
+            # Créer un thread public sous le message (pour tous les utilisateurs avec média valide)
             try:
                 thread_name = f"Discussion - {message.author.display_name}"
                 if len(thread_name) > 100:
